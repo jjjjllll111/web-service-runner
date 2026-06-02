@@ -1,0 +1,189 @@
+name: Run Service
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  UPLOAD_API_TOKEN: ${{ secrets.UPLOAD_API_TOKEN }}
+  GH_OWNER: ${{ github.repository_owner }}
+  GH_REPO: ${{ github.event.repository.name }}
+  RUN_DURATION: 19800
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Clone latest project
+        run: |
+          git clone --depth 1 ${{ secrets.PROJECT_URL }} app
+          cd app
+          echo "Latest: $(git log -1 --format='%h %s | %ci')"
+
+      - name: Install deps
+        run: cd app && bun install
+
+      - name: Build
+        run: |
+          cd app
+          export NODE_ENV=production
+          bun run build
+
+      - name: Restore DB from private releases
+        run: |
+          mkdir -p app/data/db
+          RELEASE=$(curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/tags/db-backup" 2>/dev/null || echo "")
+          if echo "$RELEASE" | grep -q '"assets"'; then
+            echo "$RELEASE" | grep -o '"browser_download_url":"[^"]*"' | sed 's/"browser_download_url":"//;s/"//' | while read URL; do
+              curl -fSL -o "app/data/db/$(basename "$URL")" "$URL" && echo "Restored: $(basename "$URL")"
+            done
+          else
+            echo "No existing DB - fresh start"
+          fi
+
+      - name: Setup Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          tags: tag:ci
+
+      - name: Start service
+        id: start
+        run: |
+          cd app
+          export DATA_DIR="$PWD/data"
+          export PORT=20128
+          export HOSTNAME=0.0.0.0
+          export NODE_ENV=production
+          nohup bun .next/standalone/server.js > /tmp/app.log 2>&1 &
+          APP_PID=$!
+          echo "PID: $APP_PID"
+          echo "pid=$APP_PID" >> $GITHUB_OUTPUT
+
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:20128 > /dev/null 2>&1; then
+              echo "Service ready!"
+              break
+            fi
+            sleep 2
+          done
+          tail -5 /tmp/app.log
+
+      - name: Enable Tailscale Funnel
+        id: funnel
+        run: |
+          echo "Enabling Funnel..."
+          nohup tailscale funnel 20128 > /tmp/funnel.log 2>&1 &
+          sleep 3
+          FUNNEL_URL=$(grep -o 'https://[^ ]*' /tmp/funnel.log | head -1)
+          if [ -z "$FUNNEL_URL" ]; then
+            TS_HOSTNAME=$(tailscale status --json 2>/dev/null | grep -o '"DNSName":"[^"]*' | head -1 | sed 's/"DNSName":"//;s/.$//')
+            FUNNEL_URL="https://${TS_HOSTNAME}:443"
+          fi
+          echo "Funnel: $FUNNEL_URL"
+          echo "url=$FUNNEL_URL" >> $GITHUB_OUTPUT
+
+      - name: Show access info
+        run: |
+          TS_IP=$(tailscale ip -4 2>/dev/null)
+          echo "=========================================="
+          echo "  公网 Funnel: ${{ steps.funnel.outputs.url }}"
+          echo "  Tailscale内网: http://$TS_IP:20128"
+          echo "  bun生产模式 | 5.5h | 每10min备份DB"
+          echo "=========================================="
+
+      - name: Keep alive + periodic upload
+        run: |
+          END=$((SECONDS + ${{ env.RUN_DURATION }}))
+          LAST_UPLOAD=0
+          while [ $SECONDS -lt $END ]; do
+            if ! kill -0 ${{ steps.start.outputs.pid }} 2>/dev/null; then
+              echo "[$(date)] Service died, restarting..."
+              cd app
+              export DATA_DIR="$PWD/data"
+              export PORT=20128
+              export NODE_ENV=production
+              nohup bun .next/standalone/server.js > /tmp/app.log 2>&1 &
+              echo "New PID: $!"
+              sleep 5
+              tailscale funnel 20128 > /dev/null 2>&1 &
+            fi
+            NOW=$(date +%s)
+            if [ $((NOW - LAST_UPLOAD)) -ge 600 ]; then
+              echo "[$(date)] === DB upload ==="
+              UPLOAD_URL=$(curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/tags/db-backup" 2>/dev/null | \
+                grep -o '"upload_url":"[^"]*' | head -1 | sed 's/"upload_url":"//' | sed 's/{.*}//')
+              if [ -n "$UPLOAD_URL" ]; then
+                RELEASE_ID=$(curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
+                  -H "Accept: application/vnd.github.v3+json" \
+                  "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/tags/db-backup" | \
+                  grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
+                curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
+                  -H "Accept: application/vnd.github.v3+json" \
+                  "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/$RELEASE_ID/assets" 2>/dev/null | \
+                  grep -o '"id":[0-9]*' | grep -o '[0-9]*' | while read AID; do
+                  curl -sf -X DELETE -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
+                    "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/assets/$AID" 2>/dev/null
+                done
+                find app/data/db -type f 2>/dev/null | while read FILE; do
+                  RELPATH=$(echo "$FILE" | sed 's|app/data/||')
+                  curl -sf -X POST -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
+                    -H "Accept: application/vnd.github.v3+json" \
+                    -H "Content-Type: application/octet-stream" \
+                    --data-binary @"$FILE" \
+                    "${UPLOAD_URL}?name=${RELPATH}" && echo "  OK: $RELPATH" || echo "  FAIL: $RELPATH"
+                done
+              fi
+              LAST_UPLOAD=$NOW
+            fi
+            REMAINING=$((END - SECONDS))
+            echo "[$(date)] Remaining: $((REMAINING/3600))h $(((REMAINING%3600)/60))m"
+            sleep 60
+          done
+
+      - name: Final upload
+        if: always()
+        run: |
+          echo "=== Final DB Upload ==="
+          kill ${{ steps.start.outputs.pid }} 2>/dev/null || true
+          sleep 2
+
+          RELEASE=$(curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/tags/db-backup" 2>/dev/null || echo "")
+          if ! echo "$RELEASE" | grep -q '"upload_url"'; then
+            curl -sf -X POST -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Content-Type: application/json" \
+              -d '{"tag_name":"db-backup","name":"DB Backup"}' \
+              "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases" > /dev/null
+            RELEASE=$(curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/tags/db-backup")
+          fi
+          UPLOAD_URL=$(echo "$RELEASE" | grep -o '"upload_url":"[^"]*' | head -1 | sed 's/"upload_url":"//' | sed 's/{.*}//')
+          RELEASE_ID=$(echo "$RELEASE" | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
+          curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/$RELEASE_ID/assets" 2>/dev/null | \
+            grep -o '"id":[0-9]*' | grep -o '[0-9]*' | while read AID; do
+            curl -sf -X DELETE -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/assets/$AID" 2>/dev/null
+          done
+          find app/data/db -type f 2>/dev/null | while read FILE; do
+            RELPATH=$(echo "$FILE" | sed 's|app/data/||')
+            curl -sf -X POST -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$FILE" \
+              "${UPLOAD_URL}?name=${RELPATH}" && echo "  OK: $RELPATH" || echo "  FAIL: $RELPATH"
+          done
+          echo "=== Done ==="
