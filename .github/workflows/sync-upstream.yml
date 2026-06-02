@@ -8,9 +8,6 @@ on:
 permissions:
   contents: write
 
-env:
-  PROJECT_URL: ${{ secrets.PROJECT_URL }}
-
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -19,17 +16,29 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
+
+      - name: Validate PROJECT_URL secret
+        run: |
+          if [ -z "${{ secrets.PROJECT_URL }}" ]; then
+            echo "::error::PROJECT_URL secret is not set. Please add it in repository secrets."
+            exit 1
+          fi
+          echo "PROJECT_URL is set"
+
       - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
       - name: Fetch upstream
         run: |
           git remote add upstream ${{ secrets.PROJECT_URL }}
           git fetch upstream --tags
+
       - name: Merge
         run: |
           git checkout main
           git merge upstream/main --no-edit || git reset --hard upstream/main
+
       - name: Push
         run: git push origin main --tags
