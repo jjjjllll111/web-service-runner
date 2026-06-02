@@ -32,7 +32,7 @@ jobs:
 
       - name: Fetch upstream
         run: |
-          git remote add upstream ${{ secrets.PROJECT_URL }}
+          git remote add upstream "${{ secrets.PROJECT_URL }}"
           git fetch upstream --tags
 
       - name: Merge
