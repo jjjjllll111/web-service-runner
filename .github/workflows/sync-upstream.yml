@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  PROJECT_URL: ${{ secrets.PROJECT_URL }}
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -22,7 +25,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
       - name: Fetch upstream
         run: |
-          git remote add upstream https://github.com/decolua/9router.git
+          git remote add upstream ${{ secrets.PROJECT_URL }}
           git fetch upstream --tags
       - name: Merge
         run: |
