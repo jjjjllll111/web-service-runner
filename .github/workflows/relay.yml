@@ -13,7 +13,7 @@ jobs:
   relay:
     runs-on: ubuntu-latest
     steps:
-      - name: Wait for run-9router to fully finish
+      - name: Wait for run to fully finish
         run: |
           echo "Waiting for previous run to fully clean up..."
           sleep 60
@@ -22,7 +22,7 @@ jobs:
           OWNER="${{ github.repository_owner }}"
           REPO="${{ github.event.repository.name }}"
 
-          # 确认没有 in_progress 的 run-9router
+          # 确认没有 in_progress 的 run
           for i in $(seq 1 10); do
             COUNT=$(curl -sf -H "Authorization: Bearer $API_TOKEN" \
               -H "Accept: application/vnd.github.v3+json" \
@@ -36,9 +36,9 @@ jobs:
             sleep 30
           done
 
-      - name: Trigger next run-9router
+      - name: Trigger next run
         run: |
-          echo "Triggering next run-9router..."
+          echo "Triggering next run..."
           curl -sf -X POST \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
