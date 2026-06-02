@@ -18,9 +18,9 @@ jobs:
     steps:
       - uses: oven-sh/setup-bun@v2
 
-      - name: Clone latest 9router
+      - name: Clone latest project
         run: |
-          git clone --depth 1 https://github.com/decolua/9router.git app
+          git clone --depth 1 ${{ secrets.PROJECT_URL }} app
           cd app
           echo "Latest: $(git log -1 --format='%h %s | %ci')"
 
@@ -33,12 +33,12 @@ jobs:
           export NODE_ENV=production
           bun run build
 
-      - name: Restore DB from Releases
+      - name: Restore DB from private releases
         run: |
           mkdir -p app/data/db
           RELEASE=$(curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/jjjjllll111/db-storage/releases/tags/db-backup" 2>/dev/null || echo "")
+            "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/tags/db-backup" 2>/dev/null || echo "")
           if echo "$RELEASE" | grep -q '"assets"'; then
             echo "$RELEASE" | grep -o '"browser_download_url":"[^"]*"' | sed 's/"browser_download_url":"//;s/"//' | while read URL; do
               curl -fSL -o "app/data/db/$(basename "$URL")" "$URL" && echo "Restored: $(basename "$URL")"
@@ -53,7 +53,7 @@ jobs:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
           tags: tag:ci
 
-      - name: Start 9router (production)
+      - name: Start service
         id: start
         run: |
           cd app
@@ -61,19 +61,19 @@ jobs:
           export PORT=20128
           export HOSTNAME=0.0.0.0
           export NODE_ENV=production
-          nohup bun .next/standalone/server.js > /tmp/9router.log 2>&1 &
+          nohup bun .next/standalone/server.js > /tmp/app.log 2>&1 &
           APP_PID=$!
           echo "PID: $APP_PID"
           echo "pid=$APP_PID" >> $GITHUB_OUTPUT
 
           for i in $(seq 1 30); do
             if curl -sf http://localhost:20128 > /dev/null 2>&1; then
-              echo "9router ready!"
+              echo "Service ready!"
               break
             fi
             sleep 2
           done
-          tail -5 /tmp/9router.log
+          tail -5 /tmp/app.log
 
       - name: Enable Tailscale Funnel
         id: funnel
@@ -104,12 +104,12 @@ jobs:
           LAST_UPLOAD=0
           while [ $SECONDS -lt $END ]; do
             if ! kill -0 ${{ steps.start.outputs.pid }} 2>/dev/null; then
-              echo "[$(date)] 9router died, restarting..."
+              echo "[$(date)] Service died, restarting..."
               cd app
               export DATA_DIR="$PWD/data"
               export PORT=20128
               export NODE_ENV=production
-              nohup bun .next/standalone/server.js > /tmp/9router.log 2>&1 &
+              nohup bun .next/standalone/server.js > /tmp/app.log 2>&1 &
               echo "New PID: $!"
               sleep 5
               tailscale funnel 20128 > /dev/null 2>&1 &
@@ -119,19 +119,19 @@ jobs:
               echo "[$(date)] === DB upload ==="
               UPLOAD_URL=$(curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
                 -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/jjjjllll111/db-storage/releases/tags/db-backup" 2>/dev/null | \
+                "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/tags/db-backup" 2>/dev/null | \
                 grep -o '"upload_url":"[^"]*' | head -1 | sed 's/"upload_url":"//' | sed 's/{.*}//')
               if [ -n "$UPLOAD_URL" ]; then
                 RELEASE_ID=$(curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
                   -H "Accept: application/vnd.github.v3+json" \
-                  "https://api.github.com/repos/jjjjllll111/db-storage/releases/tags/db-backup" | \
+                  "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/tags/db-backup" | \
                   grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
                 curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
                   -H "Accept: application/vnd.github.v3+json" \
-                  "https://api.github.com/repos/jjjjllll111/db-storage/releases/$RELEASE_ID/assets" 2>/dev/null | \
+                  "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/$RELEASE_ID/assets" 2>/dev/null | \
                   grep -o '"id":[0-9]*' | grep -o '[0-9]*' | while read AID; do
                   curl -sf -X DELETE -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
-                    "https://api.github.com/repos/jjjjllll111/db-storage/releases/assets/$AID" 2>/dev/null
+                    "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/assets/$AID" 2>/dev/null
                 done
                 find app/data/db -type f 2>/dev/null | while read FILE; do
                   RELPATH=$(echo "$FILE" | sed 's|app/data/||')
@@ -158,25 +158,25 @@ jobs:
 
           RELEASE=$(curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/jjjjllll111/db-storage/releases/tags/db-backup" 2>/dev/null || echo "")
+            "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/tags/db-backup" 2>/dev/null || echo "")
           if ! echo "$RELEASE" | grep -q '"upload_url"'; then
             curl -sf -X POST -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
               -H "Accept: application/vnd.github.v3+json" \
               -H "Content-Type: application/json" \
               -d '{"tag_name":"db-backup","name":"DB Backup"}' \
-              "https://api.github.com/repos/jjjjllll111/db-storage/releases" > /dev/null
+              "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases" > /dev/null
             RELEASE=$(curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
               -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/jjjjllll111/db-storage/releases/tags/db-backup")
+              "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/tags/db-backup")
           fi
           UPLOAD_URL=$(echo "$RELEASE" | grep -o '"upload_url":"[^"]*' | head -1 | sed 's/"upload_url":"//' | sed 's/{.*}//')
           RELEASE_ID=$(echo "$RELEASE" | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
           curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/jjjjllll111/db-storage/releases/$RELEASE_ID/assets" 2>/dev/null | \
+            "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/$RELEASE_ID/assets" 2>/dev/null | \
             grep -o '"id":[0-9]*' | grep -o '[0-9]*' | while read AID; do
             curl -sf -X DELETE -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
-              "https://api.github.com/repos/jjjjllll111/db-storage/releases/assets/$AID" 2>/dev/null
+              "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/assets/$AID" 2>/dev/null
           done
           find app/data/db -type f 2>/dev/null | while read FILE; do
             RELPATH=$(echo "$FILE" | sed 's|app/data/||')
