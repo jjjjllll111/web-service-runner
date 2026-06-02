@@ -2,7 +2,7 @@ name: Relay
 
 on:
   workflow_run:
-    workflows: ["Run 9router"]
+    workflows: ["Run Service"]
     types: [completed]
 
 permissions:
