@@ -52,6 +52,7 @@ jobs:
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
           tags: tag:ci
+          hostname: runner-funnel
 
       - name: Start service
         id: start
