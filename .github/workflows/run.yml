@@ -281,7 +281,11 @@ jobs:
           cat /home/runner/tailscaled.log 2>/dev/null | tail -n 80 || true
 
       - name: Keep alive + periodic upload
+        env:
+          TAILSCALE_AUTHKEY: ${{ env.TAILSCALE_AUTHKEY }}
         run: |
+          FUNNEL_URL="${{ steps.funnel.outputs.url }}"
+
           upload_db() {
             echo "[$(date)] === DB upload ==="
             sudo tar -czf app/data/db/tailscale-state.tgz -C /tmp tailscale-state 2>/dev/null || true
@@ -307,26 +311,74 @@ jobs:
             echo "[$(date)] === Upload done ==="
           }
 
+          check_and_fix_tailscale() {
+            local STATUS=$(tailscale status --json 2>/dev/null | jq -r '.BackendState' 2>/dev/null)
+            if [ "$STATUS" != "Running" ]; then
+              echo "[$(date)] Tailscale not running (state=$STATUS), reconnecting..."
+              sudo tailscale up --authkey=${TAILSCALE_AUTHKEY} --hostname=runner-funnel --accept-routes --timeout=60s 2>/dev/null || true
+              sleep 3
+              sudo tailscale funnel --bg --yes --https=443 20128 2>/dev/null || true
+              sleep 3
+              echo "[$(date)] Tailscale reconnected"
+              return
+            fi
+
+            # Check if Funnel is active
+            local FUNNEL_STATUS=$(sudo tailscale funnel status 2>/dev/null)
+            if ! echo "$FUNNEL_STATUS" | grep -q "Funnel on"; then
+              echo "[$(date)] Funnel not active, re-enabling..."
+              sudo tailscale funnel --bg --yes --https=443 20128 2>/dev/null || true
+              sleep 3
+              echo "[$(date)] Funnel re-enabled"
+              return
+            fi
+
+            # Check Funnel URL accessibility
+            local HTTP_CODE=$(curl -sk -o /dev/null -w '%{http_code}' "$FUNNEL_URL" --max-time 10 --connect-timeout 5 2>/dev/null)
+            if [ "$HTTP_CODE" = "000" ] || [ "$HTTP_CODE" = "" ]; then
+              echo "[$(date)] Funnel unreachable (HTTP $HTTP_CODE), restarting Tailscale..."
+              sudo tailscale down 2>/dev/null || true
+              sleep 2
+              sudo tailscale up --authkey=${TAILSCALE_AUTHKEY} --hostname=runner-funnel --accept-routes --timeout=60s 2>/dev/null || true
+              sleep 3
+              sudo tailscale funnel --bg --yes --https=443 20128 2>/dev/null || true
+              sleep 5
+              echo "[$(date)] Tailscale + Funnel restarted"
+            else
+              echo "[$(date)] Funnel OK (HTTP $HTTP_CODE)"
+            fi
+          }
+
           END=$((SECONDS + ${{ env.RUN_DURATION }}))
           LAST_UPLOAD=0
+          LAST_TSCHECK=0
+          FAIL_COUNT=0
           while [ $SECONDS -lt $END ]; do
+            # Check service process
             if ! kill -0 ${{ steps.start.outputs.pid }} 2>/dev/null; then
-              (
-                echo "[$(date)] Service died, restarting..."
-                cd app
-                export APP_DIR="$PWD" DATA_DIR="$PWD/data" PORT=20128 HOSTNAME=0.0.0.0 NODE_ENV=production
-                cd .next/standalone
-                nohup bun server.js > /tmp/app.log 2>&1 &
-                echo "New PID: $!"
-                sleep 5
-                sudo tailscale funnel --bg --yes 20128 > /dev/null 2>&1 &
-              )
+              echo "[$(date)] Service died, restarting..."
+              cd app
+              export APP_DIR="$PWD" DATA_DIR="$PWD/data" PORT=20128 HOSTNAME=0.0.0.0 NODE_ENV=production
+              cd .next/standalone
+              nohup bun server.js > /tmp/app.log 2>&1 &
+              echo "pid=$!" >> $GITHUB_OUTPUT
+              sleep 5
+              cd ../..
             fi
+
+            # Check Tailscale + Funnel every 2 minutes
             NOW=$(date +%s)
+            if [ $((NOW - LAST_TSCHECK)) -ge 120 ]; then
+              check_and_fix_tailscale
+              LAST_TSCHECK=$NOW
+            fi
+
+            # Upload DB every 10 minutes
             if [ $((NOW - LAST_UPLOAD)) -ge 600 ]; then
               upload_db
               LAST_UPLOAD=$NOW
             fi
+
             REMAINING=$((END - SECONDS))
             echo "[$(date)] Remaining: $((REMAINING/3600))h $(((REMAINING%3600)/60))m"
             sleep 60
