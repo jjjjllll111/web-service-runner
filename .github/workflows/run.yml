@@ -44,9 +44,9 @@ jobs:
           if [ -d db-repo ] && [ "$(ls -A db-repo 2>/dev/null | grep -v '^\.git$')" ]; then
             cp -r db-repo/* app/data/db/ 2>/dev/null || true
             rm -rf app/data/db/.git
-            echo "DB restored from db-storage."
+            echo "DB restored."
           else
-            echo "No existing DB - fresh start"
+            echo "Fresh start"
           fi
 
       - name: Delete ALL old Tailscale runner nodes
@@ -55,130 +55,97 @@ jobs:
         run: |
           python3 -c '
           import urllib.request, json, base64, os, sys
-
           api_key = os.environ.get("TS_API_KEY")
           if not api_key:
-              print("TS_API_KEY not found")
-              sys.exit(0)
-
-          auth_header = base64.b64encode(f"{api_key}:".encode()).decode()
+              print("TS_API_KEY not found"); sys.exit(0)
+          auth = base64.b64encode(f"{api_key}:".encode()).decode()
           req = urllib.request.Request("https://api.tailscale.com/api/v2/tailnet/-/devices")
-          req.add_header("Authorization", f"Basic {auth_header}")
+          req.add_header("Authorization", f"Basic {auth}")
           req.add_header("Accept", "application/json")
-
           try:
               with urllib.request.urlopen(req) as resp:
                   devices = json.loads(resp.read().decode()).get("devices", [])
           except Exception as e:
-              print(f"Error fetching devices: {e}")
-              sys.exit(0)
-
+              print(f"Error: {e}"); sys.exit(0)
           for dev in devices:
-              hostname = dev.get("hostname", "")
-              if "runner-funnel" in hostname:
-                  dev_id = dev.get("id")
-                  print(f"Deleting: {hostname} (ID: {dev_id})")
-                  req_del = urllib.request.Request(f"https://api.tailscale.com/api/v2/device/{dev_id}", method="DELETE")
-                  req_del.add_header("Authorization", f"Basic {auth_header}")
+              h = dev.get("hostname", "")
+              if "runner-funnel" in h:
+                  did = dev["id"]
+                  print(f"Deleting: {h} ({did})")
+                  rd = urllib.request.Request(f"https://api.tailscale.com/api/v2/device/{did}", method="DELETE")
+                  rd.add_header("Authorization", f"Basic {auth}")
                   try:
-                      with urllib.request.urlopen(req_del) as r:
-                          print(f"Deleted, status: {r.getcode()}")
-                  except Exception as ex:
-                      print(f"Error deleting: {ex}")
-          print("All old runner-funnel devices cleaned up.")
+                      with urllib.request.urlopen(rd) as r: print(f"Deleted: {r.getcode()}")
+                  except Exception as ex: print(f"Error: {ex}")
+          print("Cleaned.")
           '
           sleep 5
-          echo 'Waiting for device deletion to propagate...'
-
-      - name: Prepare fresh Tailscale state directory
-        run: |
-          sudo rm -rf /var/lib/tailscale /tmp/tailscale-state
-          sudo mkdir -p /var/lib/tailscale
-          sudo chmod 700 /var/lib/tailscale
-          mkdir -p /tmp/tailscale-state
-          echo "Fresh Tailscale state directories created."
+          echo "Propagation delay done"
 
       - name: Load Tailscale authkey
-        id: ts-cred
         env:
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
         run: |
           AUTHKEY=""
           if [ -f "app/data/db/ts-authkey.txt" ]; then
             AUTHKEY=$(cat app/data/db/ts-authkey.txt)
-            echo "Found stored authkey in db-storage"
+            echo "Found stored authkey"
           fi
-
           if [ -n "$AUTHKEY" ]; then
-            echo "has_authkey=true" >> $GITHUB_OUTPUT
             echo "::add-mask::$AUTHKEY"
             echo "TAILSCALE_AUTHKEY=$AUTHKEY" >> $GITHUB_ENV
           else
-            echo "Generating new authkey via Tailscale API..."
+            echo "Generating new authkey..."
             python3 -c '
           import urllib.request, json, base64, os
           api_key = os.environ.get("TS_API_KEY")
           auth = base64.b64encode(f"{api_key}:".encode()).decode()
-          data = json.dumps({
-              "capabilities": {"devices": {"create": {
-                  "reusable": True, "ephemeral": False,
-                  "preauthorized": True, "tags": ["tag:ci"]
-              }}},
-              "expirySeconds": 7776000
-          }).encode()
-          req = urllib.request.Request("https://api.tailscale.com/api/v2/tailnet/-/keys",
-              data=data, method="POST")
+          data = json.dumps({"capabilities": {"devices": {"create": {"reusable": True, "ephemeral": False, "preauthorized": True, "tags": ["tag:ci"]}}}, "expirySeconds": 7776000}).encode()
+          req = urllib.request.Request("https://api.tailscale.com/api/v2/tailnet/-/keys", data=data, method="POST")
           req.add_header("Authorization", f"Basic {auth}")
           req.add_header("Content-Type", "application/json")
           with urllib.request.urlopen(req) as resp:
               key = json.loads(resp.read().decode()).get("key", "")
               if key:
                   print(f"::add-mask::{key}")
-                  with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-                      f.write(f"has_authkey=true\n")
-                  with open(os.environ["GITHUB_ENV"], "a") as f:
-                      f.write(f"TAILSCALE_AUTHKEY={key}\n")
-                  with open("app/data/db/ts-authkey.txt", "w") as f:
-                      f.write(key)
-                  print("New authkey generated and saved")
-              else:
-                  print("Failed to generate authkey")
+                  with open(os.environ["GITHUB_ENV"], "a") as f: f.write(f"TAILSCALE_AUTHKEY={key}\n")
+                  with open("app/data/db/ts-authkey.txt", "w") as f: f.write(key)
+                  print("New authkey generated")
           '
           fi
 
-      - name: Setup Tailscale
-        uses: tailscale/github-action@v3
-        with:
-          authkey: ${{ env.TAILSCALE_AUTHKEY }}
-          tags: tag:ci
-          hostname: runner-funnel
-          statedir: /tmp/tailscale-state
-          version: latest
-
-      - name: Verify Tailscale connection
+      - name: Install and setup Tailscale manually
         run: |
-          echo "=== Verifying Tailscale ==="
-          for i in 1 2 3 4 5 6 7 8; do
+          echo "=== Installing Tailscale ==="
+          curl -fsSL https://tailscale.com/install.sh | sh
+          
+          echo "=== Starting tailscaled ==="
+          sudo mkdir -p /var/lib/tailscale
+          sudo mkdir -p /var/run/tailscale
+          sudo tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock > /tmp/tailscaled.log 2>&1 &
+          echo "tailscaled PID: $!"
+          sleep 3
+          
+          echo "=== Connecting to Tailscale ==="
+          sudo tailscale up \
+            --authkey=${TAILSCALE_AUTHKEY} \
+            --hostname=runner-funnel \
+            --accept-routes \
+            --reset \
+            --timeout=120s
+          
+          echo "=== Verifying connection ==="
+          for i in 1 2 3 4 5; do
             STATUS=$(tailscale status --json 2>/dev/null | jq -r '.BackendState' 2>/dev/null)
             DNS=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' 2>/dev/null | sed 's/\.$//')
             echo "Attempt $i: state=$STATUS dns=$DNS"
             if [ "$STATUS" = "Running" ]; then
               echo "Connected! DNS=$DNS"
-              TS_IP=$(tailscale ip -4 2>/dev/null)
-              echo "IP=$TS_IP"
-              if echo "$DNS" | grep -q "^runner-funnel\."; then
-                echo "Hostname OK"
-              else
-                echo "::warning::Hostname mismatch: expected runner-funnel, got $DNS"
-              fi
-              exit 0
+              echo "IP=$(tailscale ip -4 2>/dev/null)"
+              break
             fi
             sleep 3
           done
-          echo "::error::Tailscale failed to connect"
-          tailscale status 2>/dev/null || true
-          cat ~/tailscaled.log 2>/dev/null | tail -50 || true
-          exit 1
 
       - name: Start service
         id: start
@@ -194,55 +161,33 @@ jobs:
           cp -r node_modules/node-forge .next/standalone/node_modules/ 2>/dev/null || true
           cp -r node_modules/next .next/standalone/node_modules/ 2>/dev/null || true
 
-          export APP_DIR="$PWD"
-          export DATA_DIR="$APP_DIR/data"
-          export PORT=20128
-          export HOSTNAME=0.0.0.0
-          export NODE_ENV=production
-
+          export APP_DIR="$PWD" DATA_DIR="$PWD/data" PORT=20128 HOSTNAME=0.0.0.0 NODE_ENV=production
           cd .next/standalone
           nohup bun server.js > /tmp/app.log 2>&1 &
           APP_PID=$!
           echo "pid=$APP_PID" >> $GITHUB_OUTPUT
           echo "PID: $APP_PID"
           sleep 3
-
           for i in $(seq 1 10); do
-            if curl -sf http://localhost:20128 > /dev/null 2>&1; then
-              echo "Service ready!"
-              break
-            fi
+            curl -sf http://localhost:20128 > /dev/null 2>&1 && echo "Service ready!" && break
             sleep 2
           done
 
       - name: Enable Tailscale Funnel
         id: funnel
         run: |
-          echo "Enabling Funnel..."
+          echo "=== Enabling Funnel ==="
           sudo tailscale funnel --https=443 off 2>/dev/null || true
           sudo tailscale serve --https=443 off 2>/dev/null || true
           sleep 1
           sudo tailscale funnel --bg --yes --https=443 20128
           sleep 5
-
+          
           echo "--- Funnel Status ---"
           sudo tailscale funnel status 2>/dev/null || true
-
-          # Fetch HTTPS certificates (with timeout, non-blocking)
-          echo "Fetching HTTPS certificates..."
+          
           TS_HOSTNAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
-          if [ -n "$TS_HOSTNAME" ] && [ "$TS_HOSTNAME" != "null" ]; then
-            timeout 30 sudo tailscale cert "$TS_HOSTNAME" 2>/dev/null || echo "Cert fetch timed out or failed (Funnel still works without it)"
-          fi
-
-          FUNNEL_URL=$(sudo tailscale funnel status 2>/dev/null | grep -o 'https://[^ ]*' | head -1)
-          if [ -z "$FUNNEL_URL" ]; then
-            if [ -n "$TS_HOSTNAME" ] && [ "$TS_HOSTNAME" != "null" ]; then
-              FUNNEL_URL="https://${TS_HOSTNAME}/"
-            else
-              FUNNEL_URL="https://runner-funnel.tail782b5f.ts.net/"
-            fi
-          fi
+          FUNNEL_URL="https://${TS_HOSTNAME}/"
           echo "Funnel URL: $FUNNEL_URL"
           echo "url=$FUNNEL_URL" >> $GITHUB_OUTPUT
 
@@ -251,163 +196,122 @@ jobs:
         run: |
           FUNNEL_URL="${{ steps.funnel.outputs.url }}"
           echo "Testing: $FUNNEL_URL"
-          for i in 1 2 3 4 5 6 7 8 9 10; do
-            HTTP_CODE=$(curl -sk -o /dev/null -w '%{http_code}' "$FUNNEL_URL" --max-time 20 --connect-timeout 10 2>/dev/null)
-            echo "Attempt $i: HTTP $HTTP_CODE"
-            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 500 ] 2>/dev/null; then
-              echo "Funnel is accessible!"
+          for i in 1 2 3 4 5 6; do
+            CODE=$(curl -sk -o /dev/null -w '%{http_code}' "$FUNNEL_URL" --max-time 20 --connect-timeout 10 2>/dev/null)
+            echo "Attempt $i: HTTP $CODE"
+            if [ "$CODE" -ge 200 ] && [ "$CODE" -lt 500 ] 2>/dev/null; then
+              echo "Funnel accessible!"
               exit 0
             fi
-            echo "Waiting for Funnel to propagate..."
             sleep 15
           done
-          echo "::warning::Funnel may still be propagating. Service is running, try accessing in a few minutes."
-          echo "--- Tailscale status ---"
-          tailscale status 2>/dev/null || true
-          sudo tailscale funnel status 2>/dev/null || true
+          echo "::warning::Funnel may still be propagating"
 
       - name: Show access info
         if: always()
         run: |
           TS_IP=$(tailscale ip -4 2>/dev/null)
-          FUNNEL_DNS=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
+          DNS=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
           echo "=========================================="
-          echo "  公网 Funnel: https://${FUNNEL_DNS}/"
-          echo "  Tailscale内网 (直连): http://$TS_IP:20128"
-          echo "  Tailscale内网 (代连): http://$TS_IP"
-          echo "  bun生产模式 | 5.5h | 每10min备份DB"
+          echo "  公网 Funnel: https://${DNS}/"
+          echo "  Tailscale内网: http://$TS_IP:20128"
           echo "=========================================="
           sudo tailscale funnel status 2>/dev/null || true
-          cat /home/runner/tailscaled.log 2>/dev/null | tail -n 80 || true
+          tail -50 /tmp/tailscaled.log 2>/dev/null || true
 
-      - name: Keep alive + periodic upload
-        env:
-          TAILSCALE_AUTHKEY: ${{ env.TAILSCALE_AUTHKEY }}
+      - name: Keep alive + Funnel watchdog
         run: |
           FUNNEL_URL="${{ steps.funnel.outputs.url }}"
 
           upload_db() {
-            echo "[$(date)] === DB upload ==="
-            sudo tar -czf app/data/db/tailscale-state.tgz -C /tmp tailscale-state 2>/dev/null || true
+            echo "[$(date)] DB upload..."
             if [ ! -d db-repo ]; then
               git clone https://x-access-token:${{ secrets.UPLOAD_API_TOKEN }}@github.com/${{ github.repository_owner }}/db-storage.git db-repo || mkdir db-repo
             fi
-            (
-              cd db-repo
+            (cd db-repo
               git config user.name "github-actions[bot]"
               git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-              if [ ! -d .git ]; then
-                git init
-                git remote add origin https://x-access-token:${{ secrets.UPLOAD_API_TOKEN }}@github.com/${{ github.repository_owner }}/db-storage.git
-              fi
+              [ ! -d .git ] && git init && git remote add origin https://x-access-token:${{ secrets.UPLOAD_API_TOKEN }}@github.com/${{ github.repository_owner }}/db-storage.git
               find . -maxdepth 1 ! -name '.git' ! -name '.' ! -name '..' -exec rm -rf {} +
               cp -r ../app/data/db/* . 2>/dev/null || true
               git checkout --orphan temp-branch 2>/dev/null || git checkout -b temp-branch
-              git add -A
-              git commit -m "db backup" --allow-empty
-              git branch -M main
-              git push -f origin main
+              git add -A; git commit -m "backup" --allow-empty; git branch -M main; git push -f origin main
             )
-            echo "[$(date)] === Upload done ==="
           }
 
-          check_and_fix_tailscale() {
-            # 1. Check Tailscale backend state
-            local STATUS=$(tailscale status --json 2>/dev/null | jq -r '.BackendState' 2>/dev/null)
-            if [ "$STATUS" != "Running" ]; then
-              echo "[$(date)] Tailscale down (state=$STATUS), reconnecting..."
-              sudo tailscale up --authkey=${TAILSCALE_AUTHKEY} --hostname=runner-funnel --accept-routes --timeout=60s 2>/dev/null || true
-              sleep 3
-              sudo tailscale funnel --bg --yes --https=443 20128 2>/dev/null || true
-              sleep 3
-              echo "[$(date)] Reconnected"
-              return
-            fi
-
-            # 2. Check health issues
-            local HEALTH=$(tailscale status --json 2>/dev/null | jq -r '.Health[]?' 2>/dev/null)
-            if echo "$HEALTH" | grep -qi "error\|not connected\|logged out"; then
-              echo "[$(date)] Health issue detected: $HEALTH"
-              echo "[$(date)] Forcing Tailscale reconnect..."
-              sudo tailscale down 2>/dev/null || true
-              sleep 2
-              sudo tailscale up --authkey=${TAILSCALE_AUTHKEY} --hostname=runner-funnel --accept-routes --timeout=60s 2>/dev/null || true
-              sleep 3
-              sudo tailscale funnel --bg --yes --https=443 20128 2>/dev/null || true
-              sleep 3
-              echo "[$(date)] Reconnected after health issue"
-              return
-            fi
-
-            # 3. Check DERP connectivity
-            local DERP_OK=$(tailscale status --json 2>/dev/null | jq -r '.PeerAPIURL // empty' 2>/dev/null)
-            local ACTIVE_DERP=$(tailscale status --json 2>/dev/null | jq -r '.Self.Relay' 2>/dev/null)
-            if [ -z "$ACTIVE_DERP" ]; then
-              echo "[$(date)] No active DERP relay, reconnecting..."
-              sudo tailscale down 2>/dev/null || true
-              sleep 2
-              sudo tailscale up --authkey=${TAILSCALE_AUTHKEY} --hostname=runner-funnel --accept-routes --timeout=60s 2>/dev/null || true
-              sleep 3
-              sudo tailscale funnel --bg --yes --https=443 20128 2>/dev/null || true
-              sleep 3
-              return
-            fi
-
-            # 4. Check if Funnel is still active
-            local FUNNEL_STATUS=$(sudo tailscale funnel status 2>/dev/null)
-            if ! echo "$FUNNEL_STATUS" | grep -q "Funnel on"; then
-              echo "[$(date)] Funnel not active, re-enabling..."
-              sudo tailscale funnel --bg --yes --https=443 20128 2>/dev/null || true
-              sleep 3
-              echo "[$(date)] Funnel re-enabled"
-              return
-            fi
-
-            # 5. Periodic full restart every 30 minutes to prevent stale connections
-            local MINUTES=$((SECONDS / 60))
-            if [ $((MINUTES % 30)) -eq 0 ] && [ $MINUTES -gt 0 ]; then
-              local LAST_RESTART_FILE="/tmp/last_funnel_restart"
-              local LAST_RESTART=$(cat "$LAST_RESTART_FILE" 2>/dev/null || echo 0)
-              if [ $((MINUTES - LAST_RESTART)) -ge 25 ]; then
-                echo "[$(date)] Periodic Funnel refresh (${MINUTES}min)..."
-                sudo tailscale funnel --https=443 off 2>/dev/null || true
-                sleep 2
-                sudo tailscale funnel --bg --yes --https=443 20128 2>/dev/null || true
-                sleep 3
-                echo "$MINUTES" > "$LAST_RESTART_FILE"
-                echo "[$(date)] Funnel refreshed"
-                return
-              fi
-            fi
-
-            echo "[$(date)] Tailscale OK (DERP=$ACTIVE_DERP, Funnel active)"
+          restart_tailscale() {
+            echo "[$(date)] === Restarting Tailscale ==="
+            sudo pkill tailscaled 2>/dev/null || true
+            sleep 2
+            sudo tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock > /tmp/tailscaled.log 2>&1 &
+            sleep 3
+            sudo tailscale up --authkey=${TAILSCALE_AUTHKEY} --hostname=runner-funnel --accept-routes --reset --timeout=120s 2>/dev/null || true
+            sleep 3
+            sudo tailscale funnel --https=443 off 2>/dev/null || true
+            sleep 1
+            sudo tailscale funnel --bg --yes --https=443 20128 2>/dev/null || true
+            sleep 5
+            DNS=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' 2>/dev/null | sed 's/\.$//')
+            echo "[$(date)] Restarted. DNS=$DNS"
           }
 
           END=$((SECONDS + ${{ env.RUN_DURATION }}))
           LAST_UPLOAD=0
-          LAST_TSCHECK=0
+          LAST_CHECK=0
           FAIL_COUNT=0
           while [ $SECONDS -lt $END ]; do
-            # Check service process
+            NOW=$(date +%s)
+
+            # Service health
             if ! kill -0 ${{ steps.start.outputs.pid }} 2>/dev/null; then
               echo "[$(date)] Service died, restarting..."
-              cd app
-              export APP_DIR="$PWD" DATA_DIR="$PWD/data" PORT=20128 HOSTNAME=0.0.0.0 NODE_ENV=production
-              cd .next/standalone
+              cd app/.next/standalone
               nohup bun server.js > /tmp/app.log 2>&1 &
               echo "pid=$!" >> $GITHUB_OUTPUT
               sleep 5
-              cd ../..
+              cd ../../..
             fi
 
-            # Check Tailscale + Funnel every 2 minutes
-            NOW=$(date +%s)
-            if [ $((NOW - LAST_TSCHECK)) -ge 120 ]; then
-              check_and_fix_tailscale
-              LAST_TSCHECK=$NOW
+            # Tailscale + Funnel health check every 60s
+            if [ $((NOW - LAST_CHECK)) -ge 60 ]; then
+              TS_STATE=$(tailscale status --json 2>/dev/null | jq -r '.BackendState' 2>/dev/null)
+              HEALTH=$(tailscale status --json 2>/dev/null | jq -r '[.Health[]?] | join("; ")' 2>/dev/null)
+              FUNNEL_ON=$(sudo tailscale funnel status 2>/dev/null | grep -c "Funnel on" 2>/dev/null || echo 0)
+
+              if [ "$TS_STATE" != "Running" ]; then
+                echo "[$(date)] Tailscale state=$TS_STATE, restarting..."
+                restart_tailscale
+                FAIL_COUNT=0
+              elif echo "$HEALTH" | grep -qi "error\|not connected\|logged out"; then
+                echo "[$(date)] Health issue: $HEALTH"
+                restart_tailscale
+                FAIL_COUNT=0
+              elif [ "$FUNNEL_ON" -eq 0 ]; then
+                echo "[$(date)] Funnel not active, re-enabling..."
+                sudo tailscale funnel --bg --yes --https=443 20128 2>/dev/null || true
+                sleep 3
+                FAIL_COUNT=$((FAIL_COUNT + 1))
+              else
+                echo "[$(date)] OK (state=$TS_STATE, funnel=on)"
+                FAIL_COUNT=0
+              fi
+
+              # Force full restart every 25 minutes to prevent stale connections
+              MINUTES=$((SECONDS / 60))
+              if [ $((MINUTES % 25)) -eq 0 ] && [ $MINUTES -gt 5 ]; then
+                LAST_RF="/tmp/last_refresh"
+                LR=$(cat "$LAST_RF" 2>/dev/null || echo 0)
+                if [ $((MINUTES - LR)) -ge 20 ]; then
+                  echo "[$(date)] Periodic refresh at ${MINUTES}min"
+                  restart_tailscale
+                  echo "$MINUTES" > "$LAST_RF"
+                fi
+              fi
+
+              LAST_CHECK=$NOW
             fi
 
-            # Upload DB every 10 minutes
+            # DB upload every 10 min
             if [ $((NOW - LAST_UPLOAD)) -ge 600 ]; then
               upload_db
               LAST_UPLOAD=$NOW
@@ -415,33 +319,24 @@ jobs:
 
             REMAINING=$((END - SECONDS))
             echo "[$(date)] Remaining: $((REMAINING/3600))h $(((REMAINING%3600)/60))m"
-            sleep 60
+            sleep 30
           done
 
       - name: Final upload
         if: always()
         run: |
-          echo "=== Final Upload ==="
           kill ${{ steps.start.outputs.pid }} 2>/dev/null || true
           sleep 2
-          sudo tar -czf app/data/db/tailscale-state.tgz -C /tmp tailscale-state 2>/dev/null || true
           if [ ! -d db-repo ]; then
             git clone https://x-access-token:${{ secrets.UPLOAD_API_TOKEN }}@github.com/${{ github.repository_owner }}/db-storage.git db-repo || mkdir db-repo
           fi
-          (
-            cd db-repo
+          (cd db-repo
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            if [ ! -d .git ]; then
-              git init
-              git remote add origin https://x-access-token:${{ secrets.UPLOAD_API_TOKEN }}@github.com/${{ github.repository_owner }}/db-storage.git
-            fi
+            [ ! -d .git ] && git init && git remote add origin https://x-access-token:${{ secrets.UPLOAD_API_TOKEN }}@github.com/${{ github.repository_owner }}/db-storage.git
             find . -maxdepth 1 ! -name '.git' ! -name '.' ! -name '..' -exec rm -rf {} +
             cp -r ../app/data/db/* . 2>/dev/null || true
             git checkout --orphan temp-branch 2>/dev/null || git checkout -b temp-branch
-            git add -A
-            git commit -m "db backup" --allow-empty
-            git branch -M main
-            git push -f origin main
+            git add -A; git commit -m "final backup" --allow-empty; git branch -M main; git push -f origin main
           )
           echo "=== Done ==="
