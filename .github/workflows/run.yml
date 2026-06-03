@@ -191,6 +191,35 @@ jobs:
           echo "Funnel URL: $FUNNEL_URL"
           echo "url=$FUNNEL_URL" >> $GITHUB_OUTPUT
 
+
+      - name: Setup Cloudflare Tunnel (stable public URL)
+        id: cloudflare
+        run: |
+          echo "=== Installing cloudflared ==="
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+          chmod +x /usr/local/bin/cloudflared
+          
+          echo "=== Starting Cloudflare Quick Tunnel ==="
+          nohup cloudflared tunnel --url http://localhost:20128 --no-tls-verify > /tmp/cloudflared.log 2>&1 &
+          CF_PID=$!
+          echo "cloudflared PID: $CF_PID"
+          echo "$CF_PID" > /tmp/cloudflared.pid
+          
+          # Wait for tunnel URL to appear
+          for i in $(seq 1 20); do
+            CF_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cloudflared.log 2>/dev/null | head -1)
+            if [ -n "$CF_URL" ]; then
+              echo "Cloudflare Tunnel URL: $CF_URL"
+              echo "url=$CF_URL" >> $GITHUB_OUTPUT
+              break
+            fi
+            sleep 2
+          done
+          
+          if [ -z "$CF_URL" ]; then
+            echo "::warning::Cloudflare tunnel did not start"
+            cat /tmp/cloudflared.log | tail -20
+          fi
       - name: Verify Funnel connectivity
         continue-on-error: true
         run: |
@@ -213,7 +242,8 @@ jobs:
           TS_IP=$(tailscale ip -4 2>/dev/null)
           DNS=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
           echo "=========================================="
-          echo "  公网 Funnel: https://${DNS}/"
+          echo "  公网 Funnel (Tailscale): https://${DNS}/"
+          echo "  公网 (Cloudflare): ${{ steps.cloudflare.outputs.url }}"
           echo "  Tailscale内网: http://$TS_IP:20128"
           echo "=========================================="
           sudo tailscale funnel status 2>/dev/null || true
@@ -261,6 +291,15 @@ jobs:
           FAIL_COUNT=0
           while [ $SECONDS -lt $END ]; do
             NOW=$(date +%s)
+
+            # Cloudflare tunnel health
+            CF_PID=$(cat /tmp/cloudflared.pid 2>/dev/null || echo 0)
+            if [ "$CF_PID" -gt 0 ] && ! kill -0 $CF_PID 2>/dev/null; then
+              echo "[$(date)] cloudflared died, restarting..."
+              nohup cloudflared tunnel --url http://localhost:20128 --no-tls-verify > /tmp/cloudflared.log 2>&1 &
+              echo "$!" > /tmp/cloudflared.pid
+              sleep 3
+            fi
 
             # Service health
             if ! kill -0 ${{ steps.start.outputs.pid }} 2>/dev/null; then
