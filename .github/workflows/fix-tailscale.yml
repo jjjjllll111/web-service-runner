@@ -11,188 +11,173 @@ jobs:
   fix:
     runs-on: ubuntu-latest
     steps:
-      - name: Check and fix Tailscale ACL for Funnel
+      - name: Fix Tailscale ACL and Authkey
         env:
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
-        run: |
-          echo "=== Fetching current ACL policy ==="
-          AUTH_HEADER=$(echo -n "${TS_API_KEY}:" | base64)
-          
-          # Get current ACL
-          ACL=$(curl -s -H "Authorization: Basic $AUTH_HEADER" \
-            -H "Accept: application/json" \
-            "https://api.tailscale.com/api/v2/tailnet/-/acl")
-          
-          echo "Current ACL (first 2000 chars):"
-          echo "$ACL" | python3 -m json.tool 2>/dev/null | head -80 || echo "$ACL" | head -80
-          
-          # Check if nodeAttrs with funnel exists for tag:ci
-          HAS_FUNNEL=$(echo "$ACL" | python3 -c "
-          import sys, json
-          try:
-              acl = json.load(sys.stdin)
-              node_attrs = acl.get('nodeAttrs', [])
-              for attr in node_attrs:
-                  targets = attr.get('target', [])
-                  attrs = attr.get('attr', [])
-                  if 'tag:ci' in targets and 'funnel' in attrs:
-                      print('yes')
-                      sys.exit(0)
-              print('no')
-          except Exception as e:
-              print(f'error: {e}')
-          " 2>/dev/null)
-          
-          echo "Funnel attribute for tag:ci: $HAS_FUNNEL"
-          
-          if [ "$HAS_FUNNEL" != "yes" ]; then
-            echo "=== Adding funnel attribute to ACL ==="
-            
-            # Use Python to modify the ACL JSON
-            NEW_ACL=$(echo "$ACL" | python3 -c "
-          import sys, json
-          acl = json.load(sys.stdin)
-          if 'nodeAttrs' not in acl:
-              acl['nodeAttrs'] = []
-          
-          # Check if there's an existing nodeAttrs entry for tag:ci
-          found = False
-          for attr in acl.get('nodeAttrs', []):
-              if 'tag:ci' in attr.get('target', []):
-                  if 'funnel' not in attr.get('attr', []):
-                      attr['attr'].append('funnel')
-                  found = True
-                  break
-          
-          if not found:
-              acl['nodeAttrs'].append({
-                  'target': ['tag:ci'],
-                  'attr': ['funnel']
-              })
-          
-          print(json.dumps(acl))
-          ")
-            
-            # Update ACL
-            RESULT=$(curl -s -w "\n%{http_code}" -X POST \
-              -H "Authorization: Basic $AUTH_HEADER" \
-              -H "Content-Type: application/json" \
-              -d "$NEW_ACL" \
-              "https://api.tailscale.com/api/v2/tailnet/-/acl")
-            
-            HTTP_CODE=$(echo "$RESULT" | tail -1)
-            BODY=$(echo "$RESULT" | head -n -1)
-            
-            echo "ACL update HTTP code: $HTTP_CODE"
-            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-              echo "ACL updated successfully!"
-            else
-              echo "ACL update failed: $BODY"
-            fi
-          else
-            echo "ACL already has funnel for tag:ci"
-          fi
-
-      - name: Generate new authkey
-        env:
-          TS_API_KEY: ${{ secrets.TS_API_KEY }}
-        run: |
-          echo "=== Generating new Tailscale authkey ==="
-          AUTH_HEADER=$(echo -n "${TS_API_KEY}:" | base64)
-          
-          # Create a new authkey with the right properties
-          RESULT=$(curl -s -X POST \
-            -H "Authorization: Basic $AUTH_HEADER" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "capabilities": {
-                "devices": {
-                  "create": {
-                    "reusable": true,
-                    "ephemeral": false,
-                    "preauthorized": true,
-                    "tags": ["tag:ci"]
-                  }
-                }
-              },
-              "expirySeconds": 7776000
-            }' \
-            "https://api.tailscale.com/api/v2/tailnet/-/keys")
-          
-          echo "Authkey creation response:"
-          echo "$RESULT" | python3 -m json.tool 2>/dev/null || echo "$RESULT"
-          
-          # Extract the key
-          NEW_KEY=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('key',''))" 2>/dev/null)
-          
-          if [ -n "$NEW_KEY" ] && [ "$NEW_KEY" != "" ]; then
-            echo "::add-mask::$NEW_KEY"
-            echo "NEW_AUTHKEY=$NEW_KEY" >> $GITHUB_ENV
-            echo "New authkey generated successfully"
-          else
-            echo "::warning::Failed to generate new authkey"
-          fi
-
-      - name: Update TAILSCALE_AUTHKEY secret
-        if: env.NEW_AUTHKEY != ''
-        env:
-          NEW_KEY: ${{ env.NEW_AUTHKEY }}
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
-          if [ -z "$GH_PAT" ]; then
-            echo "::warning::GH_PAT not set, cannot update secret automatically"
-            echo "Please manually update the TAILSCALE_AUTHKEY secret with:"
-            echo "$NEW_KEY"
-            exit 0
-          fi
-          
-          # Encrypt and update the secret using GitHub API
-          # First get the repo public key for secret encryption
-          REPO_KEY=$(curl -s -H "Authorization: Bearer $GH_PAT" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository_owner }}/web-service-runner/actions/secrets/public-key")
-          
-          KEY_ID=$(echo "$REPO_KEY" | python3 -c "import sys,json; print(json.load(sys.stdin)['key_id'])" 2>/dev/null)
-          PUB_KEY=$(echo "$REPO_KEY" | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])" 2>/dev/null)
-          
-          if [ -z "$KEY_ID" ] || [ -z "$PUB_KEY" ]; then
-            echo "::warning::Cannot get repo public key for secret encryption"
-            echo "Please manually update the TAILSCALE_AUTHKEY secret with:"
-            echo "$NEW_KEY"
-            exit 0
-          fi
-          
-          # Encrypt the secret using libsodium
-          pip install pynacl -q
-          ENCRYPTED=$(python3 -c "
-          import base64, json
-          from nacl.public import PublicKey, SealedBox
-          pub_key = PublicKey(base64.b64decode('$PUB_KEY'))
-          sealed_box = SealedBox(pub_key)
-          encrypted = sealed_box.encrypt(b'$NEW_KEY')
-          print(base64.b64encode(encrypted).decode('utf-8'))
-          ")
-          
-          # Update the secret
-          RESULT=$(curl -s -w "\n%{http_code}" -X PUT \
-            -H "Authorization: Bearer $GH_PAT" \
-            -H "Accept: application/vnd.github.v3+json" \
-            -H "Content-Type: application/json" \
-            -d "{\"encrypted_value\":\"$ENCRYPTED\",\"key_id\":\"$KEY_ID\"}" \
-            "https://api.github.com/repos/${{ github.repository_owner }}/web-service-runner/actions/secrets/TAILSCALE_AUTHKEY")
-          
-          HTTP_CODE=$(echo "$RESULT" | tail -1)
-          if [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "201" ]; then
-            echo "TAILSCALE_AUTHKEY secret updated successfully!"
-          else
-            echo "::warning::Failed to update secret: $RESULT"
-            echo "Please manually update TAILSCALE_AUTHKEY with:"
-            echo "$NEW_KEY"
-          fi
+          pip install pynacl requests -q
+          python3 << 'PYEOF'
+          import os, json, sys, base64, requests
+
+          api_key = os.environ.get("TS_API_KEY", "")
+          gh_pat = os.environ.get("GH_PAT", "")
+          repo = os.environ.get("GITHUB_REPOSITORY", "")
+
+          if not api_key:
+              print("TS_API_KEY not set")
+              sys.exit(1)
+
+          auth = (api_key, "")
+
+          # Step 1: Get current ACL
+          print("=== Fetching current ACL ===")
+          try:
+              r = requests.get("https://api.tailscale.com/api/v2/tailnet/-/acl", auth=auth, headers={"Accept": "application/json"})
+              print(f"ACL GET status: {r.status_code}")
+              if r.status_code != 200:
+                  print(f"Error: {r.text}")
+                  sys.exit(1)
+              acl = r.json()
+          except Exception as e:
+              print(f"Error fetching ACL: {e}")
+              sys.exit(1)
+
+          print(json.dumps(acl, indent=2)[:2000])
+
+          # Step 2: Check and fix nodeAttrs for funnel
+          print("\n=== Checking funnel in nodeAttrs ===")
+          node_attrs = acl.get("nodeAttrs", [])
+          found = False
+          for attr_entry in node_attrs:
+              targets = attr_entry.get("target", [])
+              attrs = attr_entry.get("attr", [])
+              if "tag:ci" in targets:
+                  if "funnel" not in attrs:
+                      attrs.append("funnel")
+                      print("Added 'funnel' to existing tag:ci nodeAttrs entry")
+                  else:
+                      print("'funnel' already present for tag:ci")
+                  found = True
+                  break
+
+          if not found:
+              node_attrs.append({
+                  "target": ["tag:ci"],
+                  "attr": ["funnel"]
+              })
+              acl["nodeAttrs"] = node_attrs
+              print("Added new nodeAttrs entry for tag:ci with funnel")
+          elif found and "funnel" in [a for entry in node_attrs for a in entry.get("attr", []) if "tag:ci" in entry.get("target", [])]:
+              print("ACL already has funnel for tag:ci")
+          else:
+              # Update ACL
+              print("\n=== Updating ACL ===")
+              r2 = requests.post(
+                  "https://api.tailscale.com/api/v2/tailnet/-/acl",
+                  auth=auth,
+                  headers={"Content-Type": "application/json"},
+                  json=acl
+              )
+              print(f"ACL update status: {r2.status_code}")
+              if r2.status_code in (200, 201, 204):
+                  print("ACL updated successfully!")
+              else:
+                  print(f"ACL update response: {r2.text}")
+
+          # If we didn't need to update, still confirm
+          if found:
+              # Re-check after potential update
+              pass
+
+          # Step 3: Generate new authkey
+          print("\n=== Generating new authkey ===")
+          try:
+              r3 = requests.post(
+                  "https://api.tailscale.com/api/v2/tailnet/-/keys",
+                  auth=auth,
+                  headers={"Content-Type": "application/json"},
+                  json={
+                      "capabilities": {
+                          "devices": {
+                              "create": {
+                                  "reusable": True,
+                                  "ephemeral": False,
+                                  "preauthorized": True,
+                                  "tags": ["tag:ci"]
+                              }
+                          }
+                      },
+                      "expirySeconds": 7776000
+                  }
+              )
+              print(f"Authkey creation status: {r3.status_code}")
+              key_data = r3.json()
+              new_key = key_data.get("key", "")
+              if new_key:
+                  print(f"::add-mask::{new_key}")
+                  print(f"New authkey: {new_key[:20]}...")
+              else:
+                  print(f"Authkey creation response: {r3.text}")
+                  sys.exit(1)
+          except Exception as e:
+              print(f"Error creating authkey: {e}")
+              sys.exit(1)
+
+          # Step 4: Update GitHub secret
+          if gh_pat and new_key:
+              print("\n=== Updating TAILSCALE_AUTHKEY secret ===")
+              try:
+                  # Get repo public key
+                  r4 = requests.get(
+                      f"https://api.github.com/repos/{repo}/actions/secrets/public-key",
+                      headers={
+                          "Authorization": f"Bearer {gh_pat}",
+                          "Accept": "application/vnd.github.v3+json"
+                      }
+                  )
+                  key_info = r4.json()
+                  key_id = key_info["key_id"]
+                  pub_key_b64 = key_info["key"]
+
+                  # Encrypt the secret
+                  from nacl.public import PublicKey, SealedBox
+                  pub_key = PublicKey(base64.b64decode(pub_key_b64))
+                  sealed_box = SealedBox(pub_key)
+                  encrypted = sealed_box.encrypt(new_key.encode("utf-8"))
+                  encrypted_b64 = base64.b64encode(encrypted).decode("utf-8")
+
+                  # Update the secret
+                  r5 = requests.put(
+                      f"https://api.github.com/repos/{repo}/actions/secrets/TAILSCALE_AUTHKEY",
+                      headers={
+                          "Authorization": f"Bearer {gh_pat}",
+                          "Accept": "application/vnd.github.v3+json",
+                          "Content-Type": "application/json"
+                      },
+                      json={
+                          "encrypted_value": encrypted_b64,
+                          "key_id": key_id
+                      }
+                  )
+                  if r5.status_code in (201, 204):
+                      print("TAILSCALE_AUTHKEY secret updated successfully!")
+                  else:
+                      print(f"Secret update failed: {r5.status_code} {r5.text}")
+                      print(f"Please manually update TAILSCALE_AUTHKEY with: {new_key}")
+              except Exception as e:
+                  print(f"Error updating secret: {e}")
+                  print(f"Please manually update TAILSCALE_AUTHKEY with: {new_key}")
+          else:
+              print("GH_PAT not set, cannot update secret automatically")
+              print(f"Please manually update TAILSCALE_AUTHKEY with: {new_key}")
+
+          print("\n=== Done ===")
+          PYEOF
 
       - name: Trigger Run Service
         run: |
-          echo "=== Triggering Run Service workflow ==="
+          echo "Triggering Run Service..."
           curl -sf -X POST \
             -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
