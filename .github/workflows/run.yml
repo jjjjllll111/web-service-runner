@@ -165,12 +165,12 @@ jobs:
           echo "--- Funnel Log ---"
           cat /tmp/funnel.log 2>/dev/null || true
           echo "------------------"
-          echo "Fetching HTTPS certificates..."
+          echo "Fetching HTTPS certificates in background..."
           TS_HOSTNAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
           if [ -n "$TS_HOSTNAME" ]; then
-            sudo tailscale cert "$TS_HOSTNAME" || true
+            nohup sudo tailscale cert "$TS_HOSTNAME" >/tmp/cert.log 2>&1 &
           else
-            sudo tailscale cert runner-funnel.tail782b5f.ts.net || true
+            nohup sudo tailscale cert runner-funnel.tail782b5f.ts.net >/tmp/cert.log 2>&1 &
           fi
           FUNNEL_URL=$(grep -o 'https://[^ ]*' /tmp/funnel.log | head -1)
           if [ -z "$FUNNEL_URL" ]; then
