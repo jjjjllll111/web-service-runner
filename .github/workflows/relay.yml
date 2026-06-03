@@ -13,20 +13,20 @@ jobs:
   relay:
     runs-on: ubuntu-latest
     steps:
-      - name: Wait for run-9router to fully finish
+      - name: Wait for run to fully finish
         run: |
           echo "Waiting for previous run to fully clean up..."
           sleep 60
 
-          API_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          API_TOKEN="${{ secrets.UPLOAD_API_TOKEN }}"
           OWNER="${{ github.repository_owner }}"
           REPO="${{ github.event.repository.name }}"
 
-          # 确认没有 in_progress 的 run-9router
+          # 确认没有 in_progress 的 run
           for i in $(seq 1 10); do
             COUNT=$(curl -sf -H "Authorization: Bearer $API_TOKEN" \
               -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/$OWNER/$REPO/actions/runs?workflow_id=run-9router.yml&status=in_progress&per_page=5" | \
+              "https://api.github.com/repos/$OWNER/$REPO/actions/runs?workflow_id=run.yml&status=in_progress&per_page=5" | \
               grep -c '"id"' || echo "0")
             if [ "$COUNT" = "0" ]; then
               echo "Previous run fully finished"
@@ -36,13 +36,13 @@ jobs:
             sleep 30
           done
 
-      - name: Trigger next run-9router
+      - name: Trigger next run
         run: |
-          echo "Triggering next run-9router..."
+          echo "Triggering next run..."
           curl -sf -X POST \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
             -H "Content-Type: application/json" \
             -d '{"ref":"main"}' \
-            "https://api.github.com/repos/${{ github.repository_owner }}/${{ github.event.repository.name }}/actions/workflows/run-9router.yml/dispatches"
+            "https://api.github.com/repos/${{ github.repository_owner }}/${{ github.event.repository.name }}/actions/workflows/run.yml/dispatches"
           echo "Next run triggered!"
