@@ -126,18 +126,23 @@ jobs:
       - name: Enable Tailscale Funnel
         id: funnel
         run: |
-          echo "Enabling Funnel..."
-          nohup sudo tailscale funnel 20128 > /tmp/funnel.log 2>&1 &
+          echo "Enabling Funnel in background..."
+          sudo tailscale funnel --bg --yes 20128
           sleep 3
-          FUNNEL_URL=$(grep -o 'https://[^ ]*' /tmp/funnel.log | head -1)
-          if [ -z "$FUNNEL_URL" ]; then
-            TS_HOSTNAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
-            FUNNEL_URL="https://${TS_HOSTNAME}:443"
-          fi
+          sudo tailscale funnel status > /tmp/funnel.log 2>&1 || true
           echo "--- Funnel Log ---"
           cat /tmp/funnel.log 2>/dev/null || true
           echo "------------------"
-          echo "Funnel: $FUNNEL_URL"
+          FUNNEL_URL=$(grep -o 'https://[^ ]*' /tmp/funnel.log | head -1)
+          if [ -z "$FUNNEL_URL" ]; then
+            TS_HOSTNAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
+            if [ -n "$TS_HOSTNAME" ]; then
+              FUNNEL_URL="https://${TS_HOSTNAME}/"
+            else
+              FUNNEL_URL="https://runner-funnel.tail782b5f.ts.net/"
+            fi
+          fi
+          echo "Funnel URL determined: $FUNNEL_URL"
           echo "url=$FUNNEL_URL" >> $GITHUB_OUTPUT
 
       - name: Show access info
@@ -145,7 +150,8 @@ jobs:
           TS_IP=$(tailscale ip -4 2>/dev/null)
           echo "=========================================="
           echo "  公网 Funnel: ${{ steps.funnel.outputs.url }}"
-          echo "  Tailscale内网: http://$TS_IP:20128"
+          echo "  Tailscale内网 (直连): http://$TS_IP:20128"
+          echo "  Tailscale内网 (代连): http://$TS_IP"
           echo "  bun生产模式 | 5.5h | 每10min备份DB"
           echo "=========================================="
           echo "--- Tailscale Serve/Funnel Status ---"
@@ -169,7 +175,7 @@ jobs:
               nohup bun .next/standalone/server.js > /tmp/app.log 2>&1 &
               echo "New PID: $!"
               sleep 5
-              sudo tailscale funnel 20128 > /dev/null 2>&1 &
+              sudo tailscale funnel --bg --yes 20128 > /dev/null 2>&1 &
             fi
             NOW=$(date +%s)
             if [ $((NOW - LAST_UPLOAD)) -ge 600 ]; then
