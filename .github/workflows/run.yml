@@ -37,16 +37,14 @@ jobs:
           export NODE_ENV=production
           bun run build
 
-      - name: Restore DB from private releases
+      - name: Restore DB from private git repo
         run: |
+          git clone https://x-access-token:${{ secrets.UPLOAD_API_TOKEN }}@github.com/${{ github.repository_owner }}/db-storage.git db-repo || mkdir db-repo
           mkdir -p app/data/db
-          RELEASE=$(curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/tags/db-backup" 2>/dev/null || echo "")
-          if echo "$RELEASE" | grep -q '"assets"'; then
-            echo "$RELEASE" | grep -o '"browser_download_url":"[^"]*"' | sed 's/"browser_download_url":"//;s/"//' | while read URL; do
-              curl -fSL -o "app/data/db/$(basename "$URL")" "$URL" && echo "Restored: $(basename "$URL")"
-            done
+          if [ -d db-repo ] && [ "$(ls -A db-repo 2>/dev/null | grep -v '^\.git$')" ]; then
+            cp -r db-repo/* app/data/db/ 2>/dev/null || true
+            rm -rf app/data/db/.git
+            echo "DB and Tailscale state restored from db-storage."
           else
             echo "No existing DB - fresh start"
           fi
@@ -202,52 +200,53 @@ jobs:
 
       - name: Keep alive + periodic upload
         run: |
+          upload_db() {
+            echo "[$(date)] === DB upload to private git repo ==="
+            sudo tar -czf app/data/db/tailscale-state.tgz -C /tmp tailscale-state 2>/dev/null || true
+            if [ ! -d db-repo ]; then
+              git clone https://x-access-token:${{ secrets.UPLOAD_API_TOKEN }}@github.com/${{ github.repository_owner }}/db-storage.git db-repo || mkdir db-repo
+            fi
+            (
+              cd db-repo
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              if [ ! -d .git ]; then
+                git init
+                git remote add origin https://x-access-token:${{ secrets.UPLOAD_API_TOKEN }}@github.com/${{ github.repository_owner }}/db-storage.git
+              fi
+              find . -maxdepth 1 ! -name '.git' ! -name '.' ! -name '..' -exec rm -rf {} +
+              cp -r ../app/data/db/* . 2>/dev/null || true
+              git checkout --orphan temp-branch 2>/dev/null || git checkout -b temp-branch
+              git add -A
+              git commit -m "db backup" --allow-empty
+              git branch -M main
+              git push -f origin main
+            )
+            echo "[$(date)] === DB upload completed ==="
+          }
+
           END=$((SECONDS + ${{ env.RUN_DURATION }}))
           LAST_UPLOAD=0
           while [ $SECONDS -lt $END ]; do
             if ! kill -0 ${{ steps.start.outputs.pid }} 2>/dev/null; then
-              echo "[$(date)] Service died, restarting..."
-              cd app
-              export APP_DIR="$PWD"
-              export DATA_DIR="$APP_DIR/data"
-              export PORT=20128
-              export HOSTNAME=0.0.0.0
-              export NODE_ENV=production
-              cd .next/standalone
-              nohup bun server.js > /tmp/app.log 2>&1 &
-              echo "New PID: $!"
-              sleep 5
-              sudo tailscale funnel --bg --yes 20128 > /dev/null 2>&1 &
+              (
+                echo "[$(date)] Service died, restarting..."
+                cd app
+                export APP_DIR="$PWD"
+                export DATA_DIR="$APP_DIR/data"
+                export PORT=20128
+                export HOSTNAME=0.0.0.0
+                export NODE_ENV=production
+                cd .next/standalone
+                nohup bun server.js > /tmp/app.log 2>&1 &
+                echo "New PID: $!"
+                sleep 5
+                sudo tailscale funnel --bg --yes 20128 > /dev/null 2>&1 &
+              )
             fi
             NOW=$(date +%s)
             if [ $((NOW - LAST_UPLOAD)) -ge 600 ]; then
-              echo "[$(date)] === DB upload ==="
-              sudo tar -czf app/data/db/tailscale-state.tgz -C /tmp tailscale-state 2>/dev/null || true
-              UPLOAD_URL=$(curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
-                -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/tags/db-backup" 2>/dev/null | \
-                grep -o '"upload_url":"[^"]*' | head -1 | sed 's/"upload_url":"//' | sed 's/{.*}//')
-              if [ -n "$UPLOAD_URL" ]; then
-                RELEASE_ID=$(curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
-                  -H "Accept: application/vnd.github.v3+json" \
-                  "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/tags/db-backup" | \
-                  grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
-                curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
-                  -H "Accept: application/vnd.github.v3+json" \
-                  "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/$RELEASE_ID/assets" 2>/dev/null | \
-                  grep -o '"id":[0-9]*' | grep -o '[0-9]*' | while read AID; do
-                  curl -sf -X DELETE -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
-                    "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/assets/$AID" 2>/dev/null
-                done
-                find app/data/db -type f 2>/dev/null | while read FILE; do
-                  NAME=$(basename "$FILE")
-                  curl -sf -X POST -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
-                    -H "Accept: application/vnd.github.v3+json" \
-                    -H "Content-Type: application/octet-stream" \
-                    --data-binary @"$FILE" \
-                    "${UPLOAD_URL}?name=${NAME}" && echo "  OK: $NAME" || echo "  FAIL: $NAME"
-                done
-              fi
+              upload_db
               LAST_UPLOAD=$NOW
             fi
             REMAINING=$((END - SECONDS))
@@ -262,35 +261,23 @@ jobs:
           kill ${{ steps.start.outputs.pid }} 2>/dev/null || true
           sleep 2
           sudo tar -czf app/data/db/tailscale-state.tgz -C /tmp tailscale-state 2>/dev/null || true
-
-          RELEASE=$(curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/tags/db-backup" 2>/dev/null || echo "")
-          if ! echo "$RELEASE" | grep -q '"upload_url"'; then
-            curl -sf -X POST -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              -H "Content-Type: application/json" \
-              -d '{"tag_name":"db-backup","name":"DB Backup"}' \
-              "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases" > /dev/null
-            RELEASE=$(curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/tags/db-backup")
+          if [ ! -d db-repo ]; then
+            git clone https://x-access-token:${{ secrets.UPLOAD_API_TOKEN }}@github.com/${{ github.repository_owner }}/db-storage.git db-repo || mkdir db-repo
           fi
-          UPLOAD_URL=$(echo "$RELEASE" | grep -o '"upload_url":"[^"]*' | head -1 | sed 's/"upload_url":"//' | sed 's/{.*}//')
-          RELEASE_ID=$(echo "$RELEASE" | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
-          curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/$RELEASE_ID/assets" 2>/dev/null | \
-            grep -o '"id":[0-9]*' | grep -o '[0-9]*' | while read AID; do
-            curl -sf -X DELETE -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
-              "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/assets/$AID" 2>/dev/null
-          done
-          find app/data/db -type f 2>/dev/null | while read FILE; do
-            NAME=$(basename "$FILE")
-            curl -sf -X POST -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              -H "Content-Type: application/octet-stream" \
-              --data-binary @"$FILE" \
-              "${UPLOAD_URL}?name=${NAME}" && echo "  OK: $NAME" || echo "  FAIL: $NAME"
-          done
+          (
+            cd db-repo
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            if [ ! -d .git ]; then
+              git init
+              git remote add origin https://x-access-token:${{ secrets.UPLOAD_API_TOKEN }}@github.com/${{ github.repository_owner }}/db-storage.git
+            fi
+            find . -maxdepth 1 ! -name '.git' ! -name '.' ! -name '..' -exec rm -rf {} +
+            cp -r ../app/data/db/* . 2>/dev/null || true
+            git checkout --orphan temp-branch 2>/dev/null || git checkout -b temp-branch
+            git add -A
+            git commit -m "db backup" --allow-empty
+            git branch -M main
+            git push -f origin main
+          )
           echo "=== Done ==="
