@@ -108,10 +108,33 @@ jobs:
       - name: Setup Tailscale
         uses: tailscale/github-action@v3
         with:
-          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
           hostname: runner-funnel
           statedir: /tmp/tailscale-state
+          version: latest
+
+      - name: Verify Tailscale connection
+        run: |
+          echo "=== Verifying Tailscale connection ==="
+          for i in 1 2 3 4 5; do
+            STATUS=$(tailscale status --json 2>/dev/null | jq -r '.BackendState' 2>/dev/null)
+            echo "Attempt $i: BackendState=$STATUS"
+            if [ "$STATUS" = "Running" ]; then
+              echo "Tailscale is connected!"
+              TS_IP=$(tailscale ip -4 2>/dev/null)
+              echo "Tailscale IP: $TS_IP"
+              DNS_NAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' 2>/dev/null)
+              echo "DNS Name: $DNS_NAME"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::Tailscale failed to connect after 5 attempts"
+          tailscale status 2>/dev/null || true
+          cat ~/tailscaled.log 2>/dev/null | tail -30 || true
+          exit 1
 
       - name: Save Tailscale state for upload
         run: |
@@ -138,42 +161,63 @@ jobs:
           export PORT=20128
           export HOSTNAME=0.0.0.0
           export NODE_ENV=production
+
           cd .next/standalone
           nohup bun server.js > /tmp/app.log 2>&1 &
-          APP_PID=$!
-          echo "PID: $APP_PID"
-          echo "pid=$APP_PID" >> $GITHUB_OUTPUT
+          echo "pid=$!" >> $GITHUB_OUTPUT
+          echo "Service started with PID $!"
+          sleep 3
 
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:20128 > /dev/null 2>&1; then
-              echo "Service ready!"
+          # Verify service is running
+          if kill -0 $! 2>/dev/null; then
+            echo "Service process is alive"
+          else
+            echo "::error::Service died immediately"
+            cat /tmp/app.log
+            exit 1
+          fi
+
+          # Verify service responds locally
+          for i in 1 2 3; do
+            if curl -sf http://127.0.0.1:20128/ -o /dev/null --max-time 5 2>/dev/null; then
+              echo "Service responds on port 20128"
               break
             fi
-            sleep 2
+            echo "Waiting for service to start... attempt $i"
+            sleep 3
           done
-          tail -5 /tmp/app.log
 
       - name: Enable Tailscale Funnel
         id: funnel
         run: |
-          echo "Enabling Funnel in background..."
-          sudo tailscale funnel --bg --yes 20128
-          sleep 3
-          sudo tailscale funnel status > /tmp/funnel.log 2>&1 || true
-          echo "--- Funnel Log ---"
-          cat /tmp/funnel.log 2>/dev/null || true
-          echo "------------------"
-          echo "Fetching HTTPS certificates in background..."
+          echo "Enabling Funnel..."
+          # Clear any stale Funnel/Serve config first
+          sudo tailscale funnel --https=443 off 2>/dev/null || true
+          sudo tailscale serve --https=443 off 2>/dev/null || true
+          sleep 1
+
+          # Start Funnel with explicit reset
+          sudo tailscale funnel --bg --yes --https=443 20128
+          sleep 5
+
+          # Show Funnel status
+          echo "--- Funnel Status ---"
+          sudo tailscale funnel status 2>/dev/null || true
+
+          # Fetch HTTPS certificates
+          echo "Fetching HTTPS certificates..."
           TS_HOSTNAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
-          if [ -n "$TS_HOSTNAME" ]; then
-            nohup sudo tailscale cert "$TS_HOSTNAME" >/tmp/cert.log 2>&1 &
+          if [ -n "$TS_HOSTNAME" ] && [ "$TS_HOSTNAME" != "null" ]; then
+            sudo tailscale cert "$TS_HOSTNAME" || true
           else
-            nohup sudo tailscale cert runner-funnel.tail782b5f.ts.net >/tmp/cert.log 2>&1 &
+            sudo tailscale cert runner-funnel.tail782b5f.ts.net || true
           fi
-          FUNNEL_URL=$(grep -o 'https://[^ ]*' /tmp/funnel.log | head -1)
+
+          # Determine Funnel URL
+          FUNNEL_URL=$(sudo tailscale funnel status 2>/dev/null | grep -o 'https://[^ ]*' | head -1)
           if [ -z "$FUNNEL_URL" ]; then
             TS_HOSTNAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
-            if [ -n "$TS_HOSTNAME" ]; then
+            if [ -n "$TS_HOSTNAME" ] && [ "$TS_HOSTNAME" != "null" ]; then
               FUNNEL_URL="https://${TS_HOSTNAME}/"
             else
               FUNNEL_URL="https://runner-funnel.tail782b5f.ts.net/"
@@ -181,6 +225,27 @@ jobs:
           fi
           echo "Funnel URL determined: $FUNNEL_URL"
           echo "url=$FUNNEL_URL" >> $GITHUB_OUTPUT
+
+      - name: Verify Funnel connectivity
+        run: |
+          FUNNEL_URL="${{ steps.funnel.outputs.url }}"
+          echo "Testing Funnel URL: $FUNNEL_URL"
+          for i in 1 2 3 4 5 6; do
+            HTTP_CODE=$(curl -sk -o /dev/null -w '%{http_code}' "$FUNNEL_URL" --max-time 15 2>/dev/null)
+            echo "Attempt $i: HTTP status = $HTTP_CODE"
+            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 500 ] 2>/dev/null; then
+              echo "Funnel is accessible from outside!"
+              exit 0
+            fi
+            echo "Waiting for Funnel to become available..."
+            sleep 10
+          done
+          echo "::warning::Funnel may not be accessible externally. Check Tailscale ACL for 'funnel' nodeAttr on tag:ci"
+          echo "--- Diagnostic Info ---"
+          sudo tailscale funnel status 2>/dev/null || true
+          sudo tailscale status 2>/dev/null || true
+          echo "--- Daemon Logs (last 30 lines) ---"
+          cat ~/tailscaled.log 2>/dev/null | tail -30 || true
 
       - name: Show access info
         run: |
