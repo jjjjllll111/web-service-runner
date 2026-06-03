@@ -123,11 +123,25 @@ jobs:
         id: start
         run: |
           cd app
-          export DATA_DIR="$PWD/data"
+          # Copy static files and auxiliary directories to standalone directory
+          mkdir -p .next/standalone/public
+          mkdir -p .next/standalone/.next/static
+          cp -r public/* .next/standalone/public/ 2>/dev/null || true
+          cp -r .next/static/* .next/standalone/.next/static/ 2>/dev/null || true
+          cp -r open-sse .next/standalone/ 2>/dev/null || true
+          mkdir -p .next/standalone/src
+          cp -r src/mitm .next/standalone/src/ 2>/dev/null || true
+          mkdir -p .next/standalone/node_modules
+          cp -r node_modules/node-forge .next/standalone/node_modules/ 2>/dev/null || true
+          cp -r node_modules/next .next/standalone/node_modules/ 2>/dev/null || true
+
+          export APP_DIR="$PWD"
+          export DATA_DIR="$APP_DIR/data"
           export PORT=20128
           export HOSTNAME=0.0.0.0
           export NODE_ENV=production
-          nohup bun .next/standalone/server.js > /tmp/app.log 2>&1 &
+          cd .next/standalone
+          nohup bun server.js > /tmp/app.log 2>&1 &
           APP_PID=$!
           echo "PID: $APP_PID"
           echo "pid=$APP_PID" >> $GITHUB_OUTPUT
@@ -187,10 +201,13 @@ jobs:
             if ! kill -0 ${{ steps.start.outputs.pid }} 2>/dev/null; then
               echo "[$(date)] Service died, restarting..."
               cd app
-              export DATA_DIR="$PWD/data"
+              export APP_DIR="$PWD"
+              export DATA_DIR="$APP_DIR/data"
               export PORT=20128
+              export HOSTNAME=0.0.0.0
               export NODE_ENV=production
-              nohup bun .next/standalone/server.js > /tmp/app.log 2>&1 &
+              cd .next/standalone
+              nohup bun server.js > /tmp/app.log 2>&1 &
               echo "New PID: $!"
               sleep 5
               sudo tailscale funnel --bg --yes 20128 > /dev/null 2>&1 &
