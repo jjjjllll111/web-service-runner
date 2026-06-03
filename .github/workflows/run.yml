@@ -88,32 +88,30 @@ jobs:
           print("All old runner-funnel devices cleaned up.")
           '
 
-      - name: Clear stale Tailscale state
+      - name: Prepare fresh Tailscale state directory
         run: |
-          # Remove any restored Tailscale state so we start fresh
-          sudo rm -rf /tmp/tailscale-state
-          rm -f app/data/db/tailscale-state.tgz
-          echo "Stale Tailscale state cleared."
+          sudo rm -rf /var/lib/tailscale /tmp/tailscale-state
+          sudo mkdir -p /var/lib/tailscale
+          sudo chmod 700 /var/lib/tailscale
+          mkdir -p /tmp/tailscale-state
+          echo "Fresh Tailscale state directories created."
 
-      - name: Load or create Tailscale authkey
+      - name: Load Tailscale authkey
         id: ts-cred
         env:
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
         run: |
-          # Check if we have a stored authkey in db-repo
           AUTHKEY=""
           if [ -f "app/data/db/ts-authkey.txt" ]; then
             AUTHKEY=$(cat app/data/db/ts-authkey.txt)
             echo "Found stored authkey in db-storage"
           fi
 
-          # Try to use stored authkey - validate by creating a test device
           if [ -n "$AUTHKEY" ]; then
             echo "has_authkey=true" >> $GITHUB_OUTPUT
             echo "::add-mask::$AUTHKEY"
             echo "TAILSCALE_AUTHKEY=$AUTHKEY" >> $GITHUB_ENV
           else
-            # Generate new authkey via API
             echo "Generating new authkey via Tailscale API..."
             python3 -c '
           import urllib.request, json, base64, os
@@ -138,7 +136,6 @@ jobs:
                       f.write(f"has_authkey=true\n")
                   with open(os.environ["GITHUB_ENV"], "a") as f:
                       f.write(f"TAILSCALE_AUTHKEY={key}\n")
-                  # Save to db for persistence
                   with open("app/data/db/ts-authkey.txt", "w") as f:
                       f.write(key)
                   print("New authkey generated and saved")
@@ -153,6 +150,7 @@ jobs:
           authkey: ${{ env.TAILSCALE_AUTHKEY }}
           tags: tag:ci
           hostname: runner-funnel
+          statedir: /tmp/tailscale-state
           version: latest
 
       - name: Verify Tailscale connection
@@ -166,7 +164,6 @@ jobs:
               echo "Connected! DNS=$DNS"
               TS_IP=$(tailscale ip -4 2>/dev/null)
               echo "IP=$TS_IP"
-              # Verify hostname is exactly runner-funnel
               if echo "$DNS" | grep -q "^runner-funnel\."; then
                 echo "Hostname OK"
               else
@@ -176,15 +173,10 @@ jobs:
             fi
             sleep 3
           done
-          echo "::error::Tailscale failed"
+          echo "::error::Tailscale failed to connect"
           tailscale status 2>/dev/null || true
           cat ~/tailscaled.log 2>/dev/null | tail -50 || true
           exit 1
-
-      - name: Save Tailscale state for upload
-        run: |
-          mkdir -p /tmp/tailscale-state
-          sudo tar -czf app/data/db/tailscale-state.tgz -C /tmp tailscale-state 2>/dev/null || true
 
       - name: Start service
         id: start
@@ -234,17 +226,22 @@ jobs:
           echo "--- Funnel Status ---"
           sudo tailscale funnel status 2>/dev/null || true
 
+          # Fetch HTTPS certificates (may take time)
           echo "Fetching HTTPS certificates..."
           TS_HOSTNAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
           if [ -n "$TS_HOSTNAME" ] && [ "$TS_HOSTNAME" != "null" ]; then
-            sudo tailscale cert "$TS_HOSTNAME" || true
-          else
-            sudo tailscale cert runner-funnel.tail782b5f.ts.net || true
+            for i in 1 2 3; do
+              echo "Cert attempt $i for $TS_HOSTNAME"
+              if sudo tailscale cert "$TS_HOSTNAME" 2>/dev/null; then
+                echo "Certificate obtained!"
+                break
+              fi
+              sleep 5
+            done
           fi
 
           FUNNEL_URL=$(sudo tailscale funnel status 2>/dev/null | grep -o 'https://[^ ]*' | head -1)
           if [ -z "$FUNNEL_URL" ]; then
-            TS_HOSTNAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
             if [ -n "$TS_HOSTNAME" ] && [ "$TS_HOSTNAME" != "null" ]; then
               FUNNEL_URL="https://${TS_HOSTNAME}/"
             else
@@ -258,18 +255,23 @@ jobs:
         run: |
           FUNNEL_URL="${{ steps.funnel.outputs.url }}"
           echo "Testing: $FUNNEL_URL"
-          for i in 1 2 3 4 5 6 7 8; do
-            HTTP_CODE=$(curl -sk -o /dev/null -w '%{http_code}' "$FUNNEL_URL" --max-time 15 2>/dev/null)
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            HTTP_CODE=$(curl -sk -o /dev/null -w '%{http_code}' "$FUNNEL_URL" --max-time 20 --connect-timeout 10 2>/dev/null)
             echo "Attempt $i: HTTP $HTTP_CODE"
             if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 500 ] 2>/dev/null; then
-              echo "Funnel accessible!"
+              echo "Funnel is accessible!"
               exit 0
             fi
-            sleep 10
+            echo "Waiting for Funnel to propagate..."
+            sleep 15
           done
-          echo "::warning::Funnel not reachable. Check ACL nodeAttrs for tag:ci funnel"
+          echo "::warning::Funnel may still be propagating. Service is running, try accessing in a few minutes."
+          echo "--- Tailscale status ---"
+          tailscale status 2>/dev/null || true
+          sudo tailscale funnel status 2>/dev/null || true
 
       - name: Show access info
+        if: always()
         run: |
           TS_IP=$(tailscale ip -4 2>/dev/null)
           FUNNEL_DNS=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
@@ -280,7 +282,7 @@ jobs:
           echo "  bun生产模式 | 5.5h | 每10min备份DB"
           echo "=========================================="
           sudo tailscale funnel status 2>/dev/null || true
-          cat /home/runner/tailscaled.log 2>/dev/null | tail -n 100 || true
+          cat /home/runner/tailscaled.log 2>/dev/null | tail -n 80 || true
 
       - name: Keep alive + periodic upload
         run: |
