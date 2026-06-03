@@ -60,8 +60,19 @@ jobs:
           restore-keys: |
             tailscale-state-
 
+      - name: Check if Tailscale state cache is restored
+        id: check-cache
+        run: |
+          if [ -d "/tmp/tailscale-state" ] && [ "$(ls -A /tmp/tailscale-state 2>/dev/null)" ]; then
+            echo "restored=true" >> $GITHUB_OUTPUT
+            echo "Tailscale state cache found and restored."
+          else
+            echo "restored=false" >> $GITHUB_OUTPUT
+            echo "No Tailscale state cache found."
+          fi
+
       - name: Delete old Tailscale runner node
-        if: steps.cache-tailscale.outputs.cache-hit != 'true'
+        if: steps.check-cache.outputs.restored != 'true'
         env:
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
         run: |
@@ -113,13 +124,11 @@ jobs:
           statedir: /tmp/tailscale-state
 
       - name: Fix Tailscale state permissions
-        if: steps.cache-tailscale.outputs.cache-hit != 'true'
         run: |
           sudo chown -R $USER /tmp/tailscale-state
           sudo chmod -R 777 /tmp/tailscale-state || true
 
       - name: Save Tailscale state cache
-        if: steps.cache-tailscale.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: /tmp/tailscale-state
