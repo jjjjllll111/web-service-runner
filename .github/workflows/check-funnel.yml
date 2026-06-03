@@ -1,0 +1,25 @@
+name: Check Funnel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test Funnel URL
+        run: |
+          echo "Testing Funnel URL..."
+          for i in 1 2 3 4 5; do
+            CODE=$(curl -sk -o /dev/null -w '%{http_code}' "https://runner-funnel.tail782b5f.ts.net/" --max-time 15 --connect-timeout 10 2>/dev/null)
+            echo "Attempt $i: HTTP $CODE ($(date))"
+            sleep 5
+          done
+          
+          echo ""
+          echo "=== DNS Resolution ==="
+          nslookup runner-funnel.tail782b5f.ts.net 2>/dev/null || dig runner-funnel.tail782b5f.ts.net +short 2>/dev/null || echo "DNS lookup tools not available"
+          
+          echo ""
+          echo "=== Direct curl with verbose ==="
+          curl -sk -v "https://runner-funnel.tail782b5f.ts.net/" --max-time 20 2>&1 | head -30 || true
