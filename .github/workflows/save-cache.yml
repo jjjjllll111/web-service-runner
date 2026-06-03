@@ -1,0 +1,30 @@
+name: Restore and Save Tailscale Cache
+
+on:
+  workflow_dispatch:
+
+jobs:
+  save-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore Tailscale state cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/tailscale-state
+          key: tailscale-state-26884099864
+
+      - name: Compress and Push to Private Repo
+        run: |
+          mkdir -p app/data/db
+          sudo tar -czf app/data/db/tailscale-state.tgz -C /tmp tailscale-state
+          git clone https://x-access-token:${{ secrets.UPLOAD_API_TOKEN }}@github.com/${{ github.repository_owner }}/db-storage.git db-repo
+          cd db-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          find . -maxdepth 1 ! -name '.git' ! -name '.' ! -name '..' -exec rm -rf {} +
+          cp ../app/data/db/tailscale-state.tgz .
+          git checkout --orphan temp-branch 2>/dev/null || git checkout -b temp-branch
+          git add -A
+          git commit -m "restore original tailscale state" --allow-empty
+          git branch -M main
+          git push -f origin main
