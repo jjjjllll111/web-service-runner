@@ -236,6 +236,26 @@ jobs:
           done
           echo "::warning::Funnel may still be propagating"
 
+
+      - name: Save Cloudflare URL to db-storage
+        run: |
+          CF_URL="${{ steps.cloudflare.outputs.url }}"
+          if [ -n "$CF_URL" ]; then
+            echo "$CF_URL" > app/data/db/cloudflare-url.txt
+            echo "Cloudflare URL saved: $CF_URL"
+            # Immediate upload of just the URL file
+            if [ ! -d db-repo ]; then
+              git clone https://x-access-token:${{ secrets.UPLOAD_API_TOKEN }}@github.com/${{ github.repository_owner }}/db-storage.git db-repo 2>/dev/null || mkdir db-repo
+            fi
+            (cd db-repo
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              [ ! -d .git ] && git init && git remote add origin https://x-access-token:${{ secrets.UPLOAD_API_TOKEN }}@github.com/${{ github.repository_owner }}/db-storage.git
+              cp ../app/data/db/cloudflare-url.txt . 2>/dev/null || true
+              git add -A; git commit -m "update cloudflare url" --allow-empty; git branch -M main; git push -f origin main
+            ) 2>/dev/null || true
+          fi
+
       - name: Show access info
         if: always()
         run: |
