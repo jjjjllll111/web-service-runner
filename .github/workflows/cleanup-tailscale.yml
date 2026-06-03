@@ -1,0 +1,51 @@
+name: Cleanup Tailscale Devices
+
+on:
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete runner-funnel devices
+        env:
+          TS_API_KEY: ${{ secrets.TS_API_KEY }}
+        run: |
+          python -c '
+          import urllib.request
+          import json
+          import base64
+          import os
+          import sys
+
+          api_key = os.environ.get("TS_API_KEY")
+          if not api_key:
+              print("TS_API_KEY not found in env")
+              sys.exit(0)
+
+          auth_header = base64.b64encode(f"{api_key}:".encode("utf-8")).decode("utf-8")
+          req_get = urllib.request.Request("https://api.tailscale.com/api/v2/tailnet/-/devices")
+          req_get.add_header("Authorization", f"Basic {auth_header}")
+          req_get.add_header("Accept", "application/json")
+
+          try:
+              with urllib.request.urlopen(req_get) as response:
+                  devices = json.loads(response.read().decode("utf-8")).get("devices", [])
+          except Exception as e:
+              print(f"Error fetching devices: {e}")
+              sys.exit(0)
+
+          for dev in devices:
+              hostname = dev.get("hostname", "")
+              if hostname.startswith("runner-funnel"):
+                  dev_id = dev.get("id")
+                  dev_name = dev.get("name", "unknown")
+                  print("Deleting device: " + dev_name + " (ID: " + str(dev_id) + ")")
+                  req_del = urllib.request.Request("https://api.tailscale.com/api/v2/device/" + str(dev_id), method="DELETE")
+                  req_del.add_header("Authorization", "Basic " + str(auth_header))
+                  try:
+                      with urllib.request.urlopen(req_del) as resp:
+                          print("Deleted, status: " + str(resp.getcode()))
+                  except Exception as ex:
+                      print("Error deleting: " + str(ex))
+          '
