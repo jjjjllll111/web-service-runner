@@ -9,6 +9,10 @@ permissions:
   actions: write
   contents: read
 
+concurrency:
+  group: relay-group
+  cancel-in-progress: true
+
 jobs:
   relay:
     runs-on: ubuntu-latest
@@ -27,7 +31,7 @@ jobs:
             COUNT=$(curl -sf -H "Authorization: Bearer $API_TOKEN" \
               -H "Accept: application/vnd.github.v3+json" \
               "https://api.github.com/repos/$OWNER/$REPO/actions/runs?workflow_id=run.yml&status=in_progress&per_page=5" | \
-              grep -c '"id"' || echo "0")
+              jq '.total_count' 2>/dev/null || echo "0")
             if [ "$COUNT" = "0" ]; then
               echo "Previous run fully finished"
               break
