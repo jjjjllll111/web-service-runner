@@ -240,12 +240,12 @@ jobs:
                     "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/assets/$AID" 2>/dev/null
                 done
                 find app/data/db -type f 2>/dev/null | while read FILE; do
-                  RELPATH=$(echo "$FILE" | sed 's|app/data/||')
+                  NAME=$(basename "$FILE")
                   curl -sf -X POST -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
                     -H "Accept: application/vnd.github.v3+json" \
                     -H "Content-Type: application/octet-stream" \
                     --data-binary @"$FILE" \
-                    "${UPLOAD_URL}?name=${RELPATH}" && echo "  OK: $RELPATH" || echo "  FAIL: $RELPATH"
+                    "${UPLOAD_URL}?name=${NAME}" && echo "  OK: $NAME" || echo "  FAIL: $NAME"
                 done
               fi
               LAST_UPLOAD=$NOW
@@ -286,11 +286,11 @@ jobs:
               "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/assets/$AID" 2>/dev/null
           done
           find app/data/db -type f 2>/dev/null | while read FILE; do
-            RELPATH=$(echo "$FILE" | sed 's|app/data/||')
+            NAME=$(basename "$FILE")
             curl -sf -X POST -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
               -H "Accept: application/vnd.github.v3+json" \
               -H "Content-Type: application/octet-stream" \
               --data-binary @"$FILE" \
-              "${UPLOAD_URL}?name=${RELPATH}" && echo "  OK: $RELPATH" || echo "  FAIL: $RELPATH"
+              "${UPLOAD_URL}?name=${NAME}" && echo "  OK: $NAME" || echo "  FAIL: $NAME"
           done
           echo "=== Done ==="
