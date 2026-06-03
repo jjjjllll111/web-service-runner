@@ -112,6 +112,12 @@ jobs:
           hostname: runner-funnel
           statedir: /tmp/tailscale-state
 
+      - name: Fix Tailscale state permissions
+        if: steps.cache-tailscale.outputs.cache-hit != 'true'
+        run: |
+          sudo chown -R $USER /tmp/tailscale-state
+          sudo chmod -R 777 /tmp/tailscale-state || true
+
       - name: Save Tailscale state cache
         if: steps.cache-tailscale.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
