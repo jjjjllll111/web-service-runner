@@ -226,18 +226,11 @@ jobs:
           echo "--- Funnel Status ---"
           sudo tailscale funnel status 2>/dev/null || true
 
-          # Fetch HTTPS certificates (may take time)
+          # Fetch HTTPS certificates (with timeout, non-blocking)
           echo "Fetching HTTPS certificates..."
           TS_HOSTNAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
           if [ -n "$TS_HOSTNAME" ] && [ "$TS_HOSTNAME" != "null" ]; then
-            for i in 1 2 3; do
-              echo "Cert attempt $i for $TS_HOSTNAME"
-              if sudo tailscale cert "$TS_HOSTNAME" 2>/dev/null; then
-                echo "Certificate obtained!"
-                break
-              fi
-              sleep 5
-            done
+            timeout 30 sudo tailscale cert "$TS_HOSTNAME" 2>/dev/null || echo "Cert fetch timed out or failed (Funnel still works without it)"
           fi
 
           FUNNEL_URL=$(sudo tailscale funnel status 2>/dev/null | grep -o 'https://[^ ]*' | head -1)
