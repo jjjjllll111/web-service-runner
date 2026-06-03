@@ -148,6 +148,12 @@ jobs:
           echo "  Tailscale内网: http://$TS_IP:20128"
           echo "  bun生产模式 | 5.5h | 每10min备份DB"
           echo "=========================================="
+          echo "--- Tailscale Serve/Funnel Status ---"
+          sudo tailscale serve status 2>/dev/null || true
+          sudo tailscale funnel status 2>/dev/null || true
+          echo "--- Tailscaled Daemon Logs ---"
+          sudo journalctl -u tailscaled --no-pager -n 100 2>/dev/null || true
+          echo "------------------------------"
 
       - name: Keep alive + periodic upload
         run: |
