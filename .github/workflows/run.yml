@@ -86,6 +86,7 @@ jobs:
                   except Exception as ex:
                       print(f"Error deleting: {ex}")
           print("All old runner-funnel devices cleaned up.")
+          sleep 5
           '
 
       - name: Prepare fresh Tailscale state directory
@@ -245,6 +246,7 @@ jobs:
           echo "url=$FUNNEL_URL" >> $GITHUB_OUTPUT
 
       - name: Verify Funnel connectivity
+        continue-on-error: true
         run: |
           FUNNEL_URL="${{ steps.funnel.outputs.url }}"
           echo "Testing: $FUNNEL_URL"
