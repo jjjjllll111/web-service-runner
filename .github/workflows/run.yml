@@ -92,7 +92,7 @@ jobs:
 
           for dev in devices:
               hostname = dev.get("hostname", "")
-              if hostname == "runner-funnel":
+              if hostname.startswith("runner-funnel"):
                   dev_id = dev.get("id")
                   dev_name = dev.get("name", "unknown")
                   print("Deleting stale device: " + str(dev_name) + " (ID: " + str(dev_id) + ")")
