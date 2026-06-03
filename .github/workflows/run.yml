@@ -105,7 +105,26 @@ jobs:
                       print("Error deleting: " + str(ex))
           '
 
-      - name: Setup Tailscale
+      - name: Detect Tailscale auth method
+        id: ts-auth
+        env:
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          if [ -n "$TS_OAUTH_CLIENT_ID" ] && [ -n "$TS_OAUTH_SECRET" ]; then
+            echo "method=oauth" >> $GITHUB_OUTPUT
+            echo "Using OAuth credentials"
+          elif [ -n "$TAILSCALE_AUTHKEY" ]; then
+            echo "method=authkey" >> $GITHUB_OUTPUT
+            echo "Using authkey (deprecated, consider switching to OAuth)"
+          else
+            echo "::error::No Tailscale credentials found. Set TS_OAUTH_CLIENT_ID + TS_OAUTH_SECRET, or TAILSCALE_AUTHKEY"
+            exit 1
+          fi
+
+      - name: Setup Tailscale (OAuth)
+        if: steps.ts-auth.outputs.method == 'oauth'
         uses: tailscale/github-action@v3
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
@@ -115,10 +134,20 @@ jobs:
           statedir: /tmp/tailscale-state
           version: latest
 
+      - name: Setup Tailscale (Authkey)
+        if: steps.ts-auth.outputs.method == 'authkey'
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          tags: tag:ci
+          hostname: runner-funnel
+          statedir: /tmp/tailscale-state
+          version: latest
+
       - name: Verify Tailscale connection
         run: |
           echo "=== Verifying Tailscale connection ==="
-          for i in 1 2 3 4 5; do
+          for i in 1 2 3 4 5 6 7 8; do
             STATUS=$(tailscale status --json 2>/dev/null | jq -r '.BackendState' 2>/dev/null)
             echo "Attempt $i: BackendState=$STATUS"
             if [ "$STATUS" = "Running" ]; then
@@ -127,13 +156,18 @@ jobs:
               echo "Tailscale IP: $TS_IP"
               DNS_NAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' 2>/dev/null)
               echo "DNS Name: $DNS_NAME"
+              # Check health
+              HEALTH=$(tailscale status --json 2>/dev/null | jq -r '.HealthIssues[]?' 2>/dev/null)
+              if [ -n "$HEALTH" ]; then
+                echo "Health issues: $HEALTH"
+              fi
               exit 0
             fi
             sleep 3
           done
-          echo "::error::Tailscale failed to connect after 5 attempts"
+          echo "::error::Tailscale failed to connect after 8 attempts"
           tailscale status 2>/dev/null || true
-          cat ~/tailscaled.log 2>/dev/null | tail -30 || true
+          cat ~/tailscaled.log 2>/dev/null | tail -50 || true
           exit 1
 
       - name: Save Tailscale state for upload
@@ -144,7 +178,6 @@ jobs:
         id: start
         run: |
           cd app
-          # Copy static files and auxiliary directories to standalone directory
           mkdir -p .next/standalone/public
           mkdir -p .next/standalone/.next/static
           cp -r public/* .next/standalone/public/ 2>/dev/null || true
@@ -164,12 +197,12 @@ jobs:
 
           cd .next/standalone
           nohup bun server.js > /tmp/app.log 2>&1 &
-          echo "pid=$!" >> $GITHUB_OUTPUT
-          echo "Service started with PID $!"
+          APP_PID=$!
+          echo "pid=$APP_PID" >> $GITHUB_OUTPUT
+          echo "Service started with PID $APP_PID"
           sleep 3
 
-          # Verify service is running
-          if kill -0 $! 2>/dev/null; then
+          if kill -0 $APP_PID 2>/dev/null; then
             echo "Service process is alive"
           else
             echo "::error::Service died immediately"
@@ -177,8 +210,7 @@ jobs:
             exit 1
           fi
 
-          # Verify service responds locally
-          for i in 1 2 3; do
+          for i in 1 2 3 4 5; do
             if curl -sf http://127.0.0.1:20128/ -o /dev/null --max-time 5 2>/dev/null; then
               echo "Service responds on port 20128"
               break
@@ -234,18 +266,20 @@ jobs:
             HTTP_CODE=$(curl -sk -o /dev/null -w '%{http_code}' "$FUNNEL_URL" --max-time 15 2>/dev/null)
             echo "Attempt $i: HTTP status = $HTTP_CODE"
             if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 500 ] 2>/dev/null; then
-              echo "Funnel is accessible from outside!"
+              echo "Funnel is accessible!"
               exit 0
             fi
             echo "Waiting for Funnel to become available..."
             sleep 10
           done
-          echo "::warning::Funnel may not be accessible externally. Check Tailscale ACL for 'funnel' nodeAttr on tag:ci"
+          echo "::warning::Funnel may not be accessible. Check:"
+          echo "  1. Tailscale ACL has nodeAttrs granting 'funnel' to tag:ci"
+          echo "  2. ACL has tagOwner for tag:ci"
           echo "--- Diagnostic Info ---"
           sudo tailscale funnel status 2>/dev/null || true
           sudo tailscale status 2>/dev/null || true
-          echo "--- Daemon Logs (last 30 lines) ---"
-          cat ~/tailscaled.log 2>/dev/null | tail -30 || true
+          echo "--- Daemon Logs (last 50 lines) ---"
+          cat ~/tailscaled.log 2>/dev/null | tail -50 || true
 
       - name: Show access info
         run: |
