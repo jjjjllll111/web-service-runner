@@ -127,7 +127,7 @@ jobs:
         id: funnel
         run: |
           echo "Enabling Funnel..."
-          nohup tailscale funnel 20128 > /tmp/funnel.log 2>&1 &
+          nohup sudo tailscale funnel 20128 > /tmp/funnel.log 2>&1 &
           sleep 3
           FUNNEL_URL=$(grep -o 'https://[^ ]*' /tmp/funnel.log | head -1)
           if [ -z "$FUNNEL_URL" ]; then
@@ -163,7 +163,7 @@ jobs:
               nohup bun .next/standalone/server.js > /tmp/app.log 2>&1 &
               echo "New PID: $!"
               sleep 5
-              tailscale funnel 20128 > /dev/null 2>&1 &
+              sudo tailscale funnel 20128 > /dev/null 2>&1 &
             fi
             NOW=$(date +%s)
             if [ $((NOW - LAST_UPLOAD)) -ge 600 ]; then
