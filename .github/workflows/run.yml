@@ -83,7 +83,7 @@ jobs:
           sleep 3
           FUNNEL_URL=$(grep -o 'https://[^ ]*' /tmp/funnel.log | head -1)
           if [ -z "$FUNNEL_URL" ]; then
-            TS_HOSTNAME=$(tailscale status --json 2>/dev/null | grep -o '"DNSName":"[^"]*' | head -1 | sed 's/"DNSName":"//;s/.$//')
+            TS_HOSTNAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
             FUNNEL_URL="https://${TS_HOSTNAME}:443"
           fi
           echo "Funnel: $FUNNEL_URL"
