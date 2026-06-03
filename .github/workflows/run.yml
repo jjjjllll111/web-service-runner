@@ -51,28 +51,20 @@ jobs:
             echo "No existing DB - fresh start"
           fi
 
-      - name: Restore Tailscale state
-        id: cache-tailscale
-        uses: actions/cache/restore@v4
-        with:
-          path: /tmp/tailscale-state
-          key: tailscale-state-${{ github.run_id }}
-          restore-keys: |
-            tailscale-state-
-
-      - name: Check if Tailscale state cache is restored
-        id: check-cache
+      - name: Restore Tailscale state from DB
+        id: restore-tailscale
         run: |
-          if [ -d "/tmp/tailscale-state" ] && [ "$(ls -A /tmp/tailscale-state 2>/dev/null)" ]; then
+          if [ -f "app/data/db/tailscale-state.tgz" ]; then
+            sudo tar -xzf app/data/db/tailscale-state.tgz -C /
             echo "restored=true" >> $GITHUB_OUTPUT
-            echo "Tailscale state cache found and restored."
+            echo "Tailscale state restored from private release."
           else
             echo "restored=false" >> $GITHUB_OUTPUT
-            echo "No Tailscale state cache found."
+            echo "No Tailscale state found in private release."
           fi
 
       - name: Delete old Tailscale runner node
-        if: steps.check-cache.outputs.restored != 'true'
+        if: steps.restore-tailscale.outputs.restored != 'true'
         env:
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
         run: |
@@ -123,16 +115,9 @@ jobs:
           hostname: runner-funnel
           statedir: /tmp/tailscale-state
 
-      - name: Fix Tailscale state permissions
+      - name: Save Tailscale state for upload
         run: |
-          sudo chown -R $USER /tmp/tailscale-state
-          sudo chmod -R 777 /tmp/tailscale-state || true
-
-      - name: Save Tailscale state cache
-        uses: actions/cache/save@v4
-        with:
-          path: /tmp/tailscale-state
-          key: tailscale-state-${{ github.run_id }}
+          sudo tar -czf app/data/db/tailscale-state.tgz -C /tmp tailscale-state
 
       - name: Start service
         id: start
@@ -237,6 +222,7 @@ jobs:
             NOW=$(date +%s)
             if [ $((NOW - LAST_UPLOAD)) -ge 600 ]; then
               echo "[$(date)] === DB upload ==="
+              sudo tar -czf app/data/db/tailscale-state.tgz -C /tmp tailscale-state 2>/dev/null || true
               UPLOAD_URL=$(curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
                 -H "Accept: application/vnd.github.v3+json" \
                 "https://api.github.com/repos/${{ github.repository_owner }}/db-storage/releases/tags/db-backup" 2>/dev/null | \
@@ -275,6 +261,7 @@ jobs:
           echo "=== Final DB Upload ==="
           kill ${{ steps.start.outputs.pid }} 2>/dev/null || true
           sleep 2
+          sudo tar -czf app/data/db/tailscale-state.tgz -C /tmp tailscale-state 2>/dev/null || true
 
           RELEASE=$(curl -sf -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
