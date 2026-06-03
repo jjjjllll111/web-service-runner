@@ -312,18 +312,48 @@ jobs:
           }
 
           check_and_fix_tailscale() {
+            # 1. Check Tailscale backend state
             local STATUS=$(tailscale status --json 2>/dev/null | jq -r '.BackendState' 2>/dev/null)
             if [ "$STATUS" != "Running" ]; then
-              echo "[$(date)] Tailscale not running (state=$STATUS), reconnecting..."
+              echo "[$(date)] Tailscale down (state=$STATUS), reconnecting..."
               sudo tailscale up --authkey=${TAILSCALE_AUTHKEY} --hostname=runner-funnel --accept-routes --timeout=60s 2>/dev/null || true
               sleep 3
               sudo tailscale funnel --bg --yes --https=443 20128 2>/dev/null || true
               sleep 3
-              echo "[$(date)] Tailscale reconnected"
+              echo "[$(date)] Reconnected"
               return
             fi
 
-            # Check if Funnel is active
+            # 2. Check health issues
+            local HEALTH=$(tailscale status --json 2>/dev/null | jq -r '.Health[]?' 2>/dev/null)
+            if echo "$HEALTH" | grep -qi "error\|not connected\|logged out"; then
+              echo "[$(date)] Health issue detected: $HEALTH"
+              echo "[$(date)] Forcing Tailscale reconnect..."
+              sudo tailscale down 2>/dev/null || true
+              sleep 2
+              sudo tailscale up --authkey=${TAILSCALE_AUTHKEY} --hostname=runner-funnel --accept-routes --timeout=60s 2>/dev/null || true
+              sleep 3
+              sudo tailscale funnel --bg --yes --https=443 20128 2>/dev/null || true
+              sleep 3
+              echo "[$(date)] Reconnected after health issue"
+              return
+            fi
+
+            # 3. Check DERP connectivity
+            local DERP_OK=$(tailscale status --json 2>/dev/null | jq -r '.PeerAPIURL // empty' 2>/dev/null)
+            local ACTIVE_DERP=$(tailscale status --json 2>/dev/null | jq -r '.Self.Relay' 2>/dev/null)
+            if [ -z "$ACTIVE_DERP" ]; then
+              echo "[$(date)] No active DERP relay, reconnecting..."
+              sudo tailscale down 2>/dev/null || true
+              sleep 2
+              sudo tailscale up --authkey=${TAILSCALE_AUTHKEY} --hostname=runner-funnel --accept-routes --timeout=60s 2>/dev/null || true
+              sleep 3
+              sudo tailscale funnel --bg --yes --https=443 20128 2>/dev/null || true
+              sleep 3
+              return
+            fi
+
+            # 4. Check if Funnel is still active
             local FUNNEL_STATUS=$(sudo tailscale funnel status 2>/dev/null)
             if ! echo "$FUNNEL_STATUS" | grep -q "Funnel on"; then
               echo "[$(date)] Funnel not active, re-enabling..."
@@ -333,20 +363,24 @@ jobs:
               return
             fi
 
-            # Check Funnel URL accessibility
-            local HTTP_CODE=$(curl -sk -o /dev/null -w '%{http_code}' "$FUNNEL_URL" --max-time 10 --connect-timeout 5 2>/dev/null)
-            if [ "$HTTP_CODE" = "000" ] || [ "$HTTP_CODE" = "" ]; then
-              echo "[$(date)] Funnel unreachable (HTTP $HTTP_CODE), restarting Tailscale..."
-              sudo tailscale down 2>/dev/null || true
-              sleep 2
-              sudo tailscale up --authkey=${TAILSCALE_AUTHKEY} --hostname=runner-funnel --accept-routes --timeout=60s 2>/dev/null || true
-              sleep 3
-              sudo tailscale funnel --bg --yes --https=443 20128 2>/dev/null || true
-              sleep 5
-              echo "[$(date)] Tailscale + Funnel restarted"
-            else
-              echo "[$(date)] Funnel OK (HTTP $HTTP_CODE)"
+            # 5. Periodic full restart every 30 minutes to prevent stale connections
+            local MINUTES=$((SECONDS / 60))
+            if [ $((MINUTES % 30)) -eq 0 ] && [ $MINUTES -gt 0 ]; then
+              local LAST_RESTART_FILE="/tmp/last_funnel_restart"
+              local LAST_RESTART=$(cat "$LAST_RESTART_FILE" 2>/dev/null || echo 0)
+              if [ $((MINUTES - LAST_RESTART)) -ge 25 ]; then
+                echo "[$(date)] Periodic Funnel refresh (${MINUTES}min)..."
+                sudo tailscale funnel --https=443 off 2>/dev/null || true
+                sleep 2
+                sudo tailscale funnel --bg --yes --https=443 20128 2>/dev/null || true
+                sleep 3
+                echo "$MINUTES" > "$LAST_RESTART_FILE"
+                echo "[$(date)] Funnel refreshed"
+                return
+              fi
             fi
+
+            echo "[$(date)] Tailscale OK (DERP=$ACTIVE_DERP, Funnel active)"
           }
 
           END=$((SECONDS + ${{ env.RUN_DURATION }}))
