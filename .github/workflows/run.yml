@@ -83,14 +83,15 @@ jobs:
               hostname = dev.get("hostname", "")
               if hostname == "runner-funnel":
                   dev_id = dev.get("id")
-                  print(f"Deleting stale device: {dev.get(\"name\")} (ID: {dev_id})")
-                  req_del = urllib.request.Request(f"https://api.tailscale.com/api/v2/device/{dev_id}", method="DELETE")
-                  req_del.add_header("Authorization", f"Basic {auth_header}")
+                  dev_name = dev.get("name", "unknown")
+                  print("Deleting stale device: " + str(dev_name) + " (ID: " + str(dev_id) + ")")
+                  req_del = urllib.request.Request("https://api.tailscale.com/api/v2/device/" + str(dev_id), method="DELETE")
+                  req_del.add_header("Authorization", "Basic " + str(auth_header))
                   try:
                       with urllib.request.urlopen(req_del) as resp:
-                          print(f"Deleted, status: {resp.getcode()}")
+                          print("Deleted, status: " + str(resp.getcode()))
                   except Exception as ex:
-                      print(f"Error deleting: {ex}")
+                      print("Error deleting: " + str(ex))
           '
 
       - name: Setup Tailscale
