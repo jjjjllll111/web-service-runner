@@ -11,173 +11,117 @@ jobs:
   fix:
     runs-on: ubuntu-latest
     steps:
-      - name: Fix Tailscale ACL and Authkey
+      - name: Fix Tailscale - clean devices, new authkey, update db-storage
         env:
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
           GH_PAT: ${{ secrets.GH_PAT }}
+          UPLOAD_API_TOKEN: ${{ secrets.UPLOAD_API_TOKEN }}
         run: |
           pip install pynacl requests -q
           python3 << 'PYEOF'
-          import os, json, sys, base64, requests
+          import os, json, sys, base64, requests, subprocess
 
           api_key = os.environ.get("TS_API_KEY", "")
           gh_pat = os.environ.get("GH_PAT", "")
+          upload_token = os.environ.get("UPLOAD_API_TOKEN", "")
           repo = os.environ.get("GITHUB_REPOSITORY", "")
+          owner = repo.split("/")[0] if "/" in repo else ""
 
           if not api_key:
-              print("TS_API_KEY not set")
-              sys.exit(1)
+              print("TS_API_KEY not set"); sys.exit(1)
 
           auth = (api_key, "")
 
-          # Step 1: Get current ACL
-          print("=== Fetching current ACL ===")
-          try:
-              r = requests.get("https://api.tailscale.com/api/v2/tailnet/-/acl", auth=auth, headers={"Accept": "application/json"})
-              print(f"ACL GET status: {r.status_code}")
-              if r.status_code != 200:
-                  print(f"Error: {r.text}")
-                  sys.exit(1)
+          # Step 1: Delete ALL runner-funnel devices
+          print("=== Cleaning old devices ===")
+          r = requests.get("https://api.tailscale.com/api/v2/tailnet/-/devices", auth=auth)
+          if r.status_code == 200:
+              for dev in r.json().get("devices", []):
+                  if "runner-funnel" in dev.get("hostname", ""):
+                      did = dev["id"]
+                      print(f"Deleting: {dev['hostname']} ({did})")
+                      requests.delete(f"https://api.tailscale.com/api/v2/device/{did}", auth=auth)
+          print("Devices cleaned.")
+
+          # Step 2: Check and fix ACL for funnel
+          print("\n=== Checking ACL ===")
+          r = requests.get("https://api.tailscale.com/api/v2/tailnet/-/acl", auth=auth, headers={"Accept": "application/json"})
+          if r.status_code == 200:
               acl = r.json()
-          except Exception as e:
-              print(f"Error fetching ACL: {e}")
-              sys.exit(1)
-
-          print(json.dumps(acl, indent=2)[:2000])
-
-          # Step 2: Check and fix nodeAttrs for funnel
-          print("\n=== Checking funnel in nodeAttrs ===")
-          node_attrs = acl.get("nodeAttrs", [])
-          found = False
-          for attr_entry in node_attrs:
-              targets = attr_entry.get("target", [])
-              attrs = attr_entry.get("attr", [])
-              if "tag:ci" in targets:
-                  if "funnel" not in attrs:
-                      attrs.append("funnel")
-                      print("Added 'funnel' to existing tag:ci nodeAttrs entry")
-                  else:
-                      print("'funnel' already present for tag:ci")
-                  found = True
-                  break
-
-          if not found:
-              node_attrs.append({
-                  "target": ["tag:ci"],
-                  "attr": ["funnel"]
-              })
-              acl["nodeAttrs"] = node_attrs
-              print("Added new nodeAttrs entry for tag:ci with funnel")
-          elif found and "funnel" in [a for entry in node_attrs for a in entry.get("attr", []) if "tag:ci" in entry.get("target", [])]:
-              print("ACL already has funnel for tag:ci")
-          else:
-              # Update ACL
-              print("\n=== Updating ACL ===")
-              r2 = requests.post(
-                  "https://api.tailscale.com/api/v2/tailnet/-/acl",
-                  auth=auth,
-                  headers={"Content-Type": "application/json"},
-                  json=acl
-              )
-              print(f"ACL update status: {r2.status_code}")
-              if r2.status_code in (200, 201, 204):
-                  print("ACL updated successfully!")
+              node_attrs = acl.get("nodeAttrs", [])
+              has_funnel = any("tag:ci" in a.get("target",[]) and "funnel" in a.get("attr",[]) for a in node_attrs)
+              if not has_funnel:
+                  node_attrs.append({"target": ["tag:ci"], "attr": ["funnel"]})
+                  acl["nodeAttrs"] = node_attrs
+                  r2 = requests.post("https://api.tailscale.com/api/v2/tailnet/-/acl", auth=auth, json=acl)
+                  print(f"ACL updated: {r2.status_code}")
               else:
-                  print(f"ACL update response: {r2.text}")
-
-          # If we didn't need to update, still confirm
-          if found:
-              # Re-check after potential update
-              pass
+                  print("ACL OK - funnel already present for tag:ci")
 
           # Step 3: Generate new authkey
           print("\n=== Generating new authkey ===")
-          try:
-              r3 = requests.post(
-                  "https://api.tailscale.com/api/v2/tailnet/-/keys",
-                  auth=auth,
-                  headers={"Content-Type": "application/json"},
-                  json={
-                      "capabilities": {
-                          "devices": {
-                              "create": {
-                                  "reusable": True,
-                                  "ephemeral": False,
-                                  "preauthorized": True,
-                                  "tags": ["tag:ci"]
-                              }
-                          }
-                      },
-                      "expirySeconds": 7776000
-                  }
-              )
-              print(f"Authkey creation status: {r3.status_code}")
-              key_data = r3.json()
-              new_key = key_data.get("key", "")
-              if new_key:
-                  print(f"::add-mask::{new_key}")
-                  print(f"New authkey: {new_key[:20]}...")
-              else:
-                  print(f"Authkey creation response: {r3.text}")
-                  sys.exit(1)
-          except Exception as e:
-              print(f"Error creating authkey: {e}")
-              sys.exit(1)
+          r = requests.post("https://api.tailscale.com/api/v2/tailnet/-/keys", auth=auth, json={
+              "capabilities": {"devices": {"create": {
+                  "reusable": True, "ephemeral": False,
+                  "preauthorized": True, "tags": ["tag:ci"]
+              }}},
+              "expirySeconds": 7776000
+          })
+          new_key = r.json().get("key", "")
+          if not new_key:
+              print(f"Failed: {r.text}"); sys.exit(1)
+          print(f"::add-mask::{new_key}")
+          print(f"New authkey: {new_key[:25]}...")
 
           # Step 4: Update GitHub secret
-          if gh_pat and new_key:
-              print("\n=== Updating TAILSCALE_AUTHKEY secret ===")
+          if gh_pat:
+              print("\n=== Updating GitHub secret ===")
               try:
-                  # Get repo public key
-                  r4 = requests.get(
-                      f"https://api.github.com/repos/{repo}/actions/secrets/public-key",
-                      headers={
-                          "Authorization": f"Bearer {gh_pat}",
-                          "Accept": "application/vnd.github.v3+json"
-                      }
-                  )
-                  key_info = r4.json()
-                  key_id = key_info["key_id"]
-                  pub_key_b64 = key_info["key"]
-
-                  # Encrypt the secret
+                  r = requests.get(f"https://api.github.com/repos/{repo}/actions/secrets/public-key",
+                      headers={"Authorization": f"Bearer {gh_pat}", "Accept": "application/vnd.github.v3+json"})
+                  kid = r.json()["key_id"]
+                  pub = r.json()["key"]
                   from nacl.public import PublicKey, SealedBox
-                  pub_key = PublicKey(base64.b64decode(pub_key_b64))
-                  sealed_box = SealedBox(pub_key)
-                  encrypted = sealed_box.encrypt(new_key.encode("utf-8"))
-                  encrypted_b64 = base64.b64encode(encrypted).decode("utf-8")
-
-                  # Update the secret
-                  r5 = requests.put(
-                      f"https://api.github.com/repos/{repo}/actions/secrets/TAILSCALE_AUTHKEY",
-                      headers={
-                          "Authorization": f"Bearer {gh_pat}",
-                          "Accept": "application/vnd.github.v3+json",
-                          "Content-Type": "application/json"
-                      },
-                      json={
-                          "encrypted_value": encrypted_b64,
-                          "key_id": key_id
-                      }
-                  )
-                  if r5.status_code in (201, 204):
-                      print("TAILSCALE_AUTHKEY secret updated successfully!")
-                  else:
-                      print(f"Secret update failed: {r5.status_code} {r5.text}")
-                      print(f"Please manually update TAILSCALE_AUTHKEY with: {new_key}")
+                  enc = SealedBox(PublicKey(base64.b64decode(pub))).encrypt(new_key.encode())
+                  r2 = requests.put(f"https://api.github.com/repos/{repo}/actions/secrets/TAILSCALE_AUTHKEY",
+                      headers={"Authorization": f"Bearer {gh_pat}", "Accept": "application/vnd.github.v3+json", "Content-Type": "application/json"},
+                      json={"encrypted_value": base64.b64encode(enc).decode(), "key_id": kid})
+                  print(f"Secret updated: {r2.status_code}")
               except Exception as e:
-                  print(f"Error updating secret: {e}")
-                  print(f"Please manually update TAILSCALE_AUTHKEY with: {new_key}")
-          else:
-              print("GH_PAT not set, cannot update secret automatically")
-              print(f"Please manually update TAILSCALE_AUTHKEY with: {new_key}")
+                  print(f"Secret update error: {e}")
 
-          print("\n=== Done ===")
+          # Step 5: Update db-storage with new authkey and remove stale state
+          if upload_token and owner:
+              print("\n=== Updating db-storage ===")
+              try:
+                  subprocess.run(["git", "clone", f"https://x-access-token:{upload_token}@github.com/{owner}/db-storage.git", "/tmp/db-repo"], check=True, capture_output=True)
+                  os.makedirs("/tmp/db-repo", exist_ok=True)
+
+                  # Save authkey
+                  with open("/tmp/db-repo/ts-authkey.txt", "w") as f:
+                      f.write(new_key)
+
+                  # Remove stale tailscale state
+                  stale = "/tmp/db-repo/tailscale-state.tgz"
+                  if os.path.exists(stale):
+                      os.remove(stale)
+                      print("Removed stale tailscale-state.tgz")
+
+                  subprocess.run(["git", "-C", "/tmp/db-repo", "config", "user.name", "github-actions[bot]"], check=True)
+                  subprocess.run(["git", "-C", "/tmp/db-repo", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
+                  subprocess.run(["git", "-C", "/tmp/db-repo", "add", "-A"], check=True)
+                  subprocess.run(["git", "-C", "/tmp/db-repo", "commit", "-m", "update authkey, clean stale state", "--allow-empty"], check=True)
+                  subprocess.run(["git", "-C", "/tmp/db-repo", "branch", "-M", "main"], check=True)
+                  subprocess.run(["git", "-C", "/tmp/db-repo", "push", "-f", "origin", "main"], check=True, capture_output=True)
+                  print("db-storage updated!")
+              except Exception as e:
+                  print(f"db-storage error: {e}")
+
+          print("\n=== All done ===")
           PYEOF
 
       - name: Trigger Run Service
         run: |
-          echo "Triggering Run Service..."
           curl -sf -X POST \
             -H "Authorization: Bearer ${{ secrets.UPLOAD_API_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
