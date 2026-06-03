@@ -51,9 +51,9 @@ jobs:
             echo "No existing DB - fresh start"
           fi
 
-      - name: Cache Tailscale state
+      - name: Restore Tailscale state
         id: cache-tailscale
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: /tmp/tailscale-state
           key: tailscale-state-${{ github.run_id }}
@@ -111,6 +111,13 @@ jobs:
           tags: tag:ci
           hostname: runner-funnel
           statedir: /tmp/tailscale-state
+
+      - name: Save Tailscale state cache
+        if: steps.cache-tailscale.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/tailscale-state
+          key: tailscale-state-${{ github.run_id }}
 
       - name: Start service
         id: start
