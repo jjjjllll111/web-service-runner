@@ -16,6 +16,7 @@ concurrency:
 jobs:
   relay:
     runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
     steps:
       - name: Trigger next run
         run: |
