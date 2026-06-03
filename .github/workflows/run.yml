@@ -86,6 +86,9 @@ jobs:
             TS_HOSTNAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' | sed 's/\.$//')
             FUNNEL_URL="https://${TS_HOSTNAME}:443"
           fi
+          echo "--- Funnel Log ---"
+          cat /tmp/funnel.log 2>/dev/null || true
+          echo "------------------"
           echo "Funnel: $FUNNEL_URL"
           echo "url=$FUNNEL_URL" >> $GITHUB_OUTPUT
 
