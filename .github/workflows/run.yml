@@ -86,8 +86,9 @@ jobs:
                   except Exception as ex:
                       print(f"Error deleting: {ex}")
           print("All old runner-funnel devices cleaned up.")
-          sleep 5
           '
+          sleep 5
+          echo 'Waiting for device deletion to propagate...'
 
       - name: Prepare fresh Tailscale state directory
         run: |
