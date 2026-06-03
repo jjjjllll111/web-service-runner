@@ -11,7 +11,7 @@ jobs:
   fix:
     runs-on: ubuntu-latest
     steps:
-      - name: Fix Tailscale - clean devices, new authkey, update db-storage
+      - name: Fix Tailscale
         env:
           TS_API_KEY: ${{ secrets.TS_API_KEY }}
           GH_PAT: ${{ secrets.GH_PAT }}
@@ -71,7 +71,7 @@ jobs:
           if not new_key:
               print(f"Failed: {r.text}"); sys.exit(1)
           print(f"::add-mask::{new_key}")
-          print(f"New authkey: {new_key[:25]}...")
+          print("New authkey generated")
 
           # Step 4: Update GitHub secret
           if gh_pat:
@@ -92,7 +92,7 @@ jobs:
 
           # Step 5: Update db-storage with new authkey and remove stale state
           if upload_token and owner:
-              print("\n=== Updating db-storage ===")
+              print("\n=== Updating remote storage ===")
               try:
                   subprocess.run(["git", "clone", f"https://x-access-token:{upload_token}@github.com/{owner}/db-storage.git", "/tmp/db-repo"], check=True, capture_output=True)
                   os.makedirs("/tmp/db-repo", exist_ok=True)
@@ -113,9 +113,9 @@ jobs:
                   subprocess.run(["git", "-C", "/tmp/db-repo", "commit", "-m", "update authkey, clean stale state", "--allow-empty"], check=True)
                   subprocess.run(["git", "-C", "/tmp/db-repo", "branch", "-M", "main"], check=True)
                   subprocess.run(["git", "-C", "/tmp/db-repo", "push", "-f", "origin", "main"], check=True, capture_output=True)
-                  print("db-storage updated!")
+                  print("Storage updated!")
               except Exception as e:
-                  print(f"db-storage error: {e}")
+                  print(f"Storage error: {type(e).__name__}")
 
           print("\n=== All done ===")
           PYEOF

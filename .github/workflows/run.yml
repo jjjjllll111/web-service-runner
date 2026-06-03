@@ -26,7 +26,7 @@ jobs:
         run: |
           git clone --depth 1 ${{ secrets.PROJECT_URL }} app
           cd app
-          echo "Latest: $(git log -1 --format='%h %s | %ci')"
+          # cloned
 
       - name: Install deps
         run: cd app && bun install
@@ -123,7 +123,7 @@ jobs:
           sudo mkdir -p /var/lib/tailscale
           sudo mkdir -p /var/run/tailscale
           sudo tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock > /tmp/tailscaled.log 2>&1 &
-          echo "tailscaled PID: $!"
+          # daemon started
           sleep 3
           
           echo "=== Connecting to Tailscale ==="
@@ -138,9 +138,9 @@ jobs:
           for i in 1 2 3 4 5; do
             STATUS=$(tailscale status --json 2>/dev/null | jq -r '.BackendState' 2>/dev/null)
             DNS=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' 2>/dev/null | sed 's/\.$//')
-            echo "Attempt $i: state=$STATUS dns=$DNS"
+            echo "Attempt $i: state=$STATUS"
             if [ "$STATUS" = "Running" ]; then
-              echo "Connected! DNS=$DNS"
+              echo "Connected!"
               echo "IP=$(tailscale ip -4 2>/dev/null)"
               break
             fi
@@ -268,7 +268,7 @@ jobs:
             sudo tailscale funnel --bg --yes --https=443 20128 2>/dev/null || true
             sleep 5
             DNS=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName' 2>/dev/null | sed 's/\.$//')
-            echo "[$(date)] Restarted. DNS=$DNS"
+            echo "[$(date)] Restarted"
           }
 
           END=$((SECONDS + ${{ env.RUN_DURATION }}))
